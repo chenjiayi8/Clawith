@@ -132,7 +132,7 @@ async def call_llm(
     api_messages.extend(messages)
 
     # Determine base URL
-    from app.services.llm_utils import get_provider_base_url, get_tool_params
+    from app.services.llm_utils import get_provider_base_url, get_tool_params, get_max_tokens
     base_url = get_provider_base_url(model.provider, model.base_url)
 
     if not base_url:
@@ -152,7 +152,7 @@ async def call_llm(
             "model": model.model,
             "messages": api_messages,
             "temperature": 0.7,
-            "max_tokens": 16384,  # Large enough for tool calls with big content args
+            "max_tokens": get_max_tokens(model.provider, model.model),  # provider-safe limit
             "tools": tools_for_llm,
             "stream": True,
             **get_tool_params(model.provider),

@@ -44,3 +44,34 @@ def get_tool_params(provider: str) -> dict:
             "parallel_tool_calls": True,
         }
     return {}
+
+
+# Per-provider / per-model max_tokens limits.
+# Qwen models: qwen-max is limited to 8192; qwen-long/qwen-plus can do more.
+_MAX_TOKENS_BY_PROVIDER: dict[str, int] = {
+    "qwen": 8192,       # conservative default; qwen-max hard limit
+    "anthropic": 4096,  # claude native max output
+}
+# Model-level overrides (model string prefix → limit)
+_MAX_TOKENS_BY_MODEL: dict[str, int] = {
+    "qwen-plus": 16384,
+    "qwen-long": 16384,
+    "qwen-turbo": 8192,
+    "qwen-max": 8192,
+}
+
+
+def get_max_tokens(provider: str, model: str | None = None) -> int:
+    """Return a safe max_tokens value for the given provider/model pair.
+
+    Prevents 400 errors from providers that have strict upper limits
+    (e.g. qwen-max rejects anything above 8192).
+    """
+    # Check model-level override first
+    if model:
+        for prefix, limit in _MAX_TOKENS_BY_MODEL.items():
+            if model.lower().startswith(prefix):
+                return limit
+    # Fall back to provider-level default, otherwise use 16384
+    return _MAX_TOKENS_BY_PROVIDER.get(provider, 16384)
+
