@@ -80,10 +80,12 @@ app = FastAPI(
 )
 
 # CORS
+_cors_origins = settings.CORS_ORIGINS
+_allow_creds = "*" not in _cors_origins  # CORS spec forbids credentials with wildcard
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=settings.CORS_ORIGINS,
-    allow_credentials=True,
+    allow_origins=_cors_origins,
+    allow_credentials=_allow_creds,
     allow_methods=["*"],
     allow_headers=["*"],
 )
