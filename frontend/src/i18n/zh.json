@@ -408,7 +408,9 @@
       "config": "平台配置",
       "kb": "公司知识库",
       "approvals": "审批",
-      "skills": "技能管理"
+      "skills": "技能管理",
+      "quotas": "配额",
+      "users": "用户"
     },
     "stats": {
       "users": "{{count}} 用户",

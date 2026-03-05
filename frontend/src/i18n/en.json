@@ -409,7 +409,9 @@
       "config": "Platform Config",
       "kb": "Company KB",
       "approvals": "Approvals",
-      "skills": "Skills"
+      "skills": "Skills",
+      "quotas": "Quotas",
+      "users": "Users"
     },
     "stats": {
       "users": "{{count}} users",

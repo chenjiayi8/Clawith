@@ -17,6 +17,9 @@ interface UserInfo {
     quota_max_agents: number;
     quota_agent_ttl_hours: number;
     agents_count: number;
+    feishu_open_id?: string;
+    created_at?: string;
+    source?: string;
 }
 
 const API_PREFIX = '/api';
@@ -38,8 +41,12 @@ const PERIOD_OPTIONS = [
     { value: 'monthly', label: 'Monthly' },
 ];
 
+const PAGE_SIZE = 15;
+
 export default function UserManagement() {
-    const { t } = useTranslation();
+    const { t, i18n } = useTranslation();
+    const isChinese = i18n.language?.startsWith('zh');
+
     const [users, setUsers] = useState<UserInfo[]>([]);
     const [loading, setLoading] = useState(true);
     const [editingUserId, setEditingUserId] = useState<string | null>(null);
@@ -51,6 +58,10 @@ export default function UserManagement() {
     });
     const [saving, setSaving] = useState(false);
     const [toast, setToast] = useState('');
+
+    // Sort & pagination
+    const [sortOrder, setSortOrder] = useState<'asc' | 'desc'>('desc');
+    const [page, setPage] = useState(1);
 
     const loadUsers = async () => {
         setLoading(true);
@@ -84,7 +95,7 @@ export default function UserManagement() {
                 method: 'PATCH',
                 body: JSON.stringify(editForm),
             });
-            setToast('✅ Quota updated');
+            setToast(isChinese ? '✅ 配额已更新' : '✅ Quota updated');
             setTimeout(() => setToast(''), 2000);
             setEditingUserId(null);
             loadUsers();
@@ -95,7 +106,35 @@ export default function UserManagement() {
         setSaving(false);
     };
 
-    const periodLabel = (period: string) => PERIOD_OPTIONS.find(p => p.value === period)?.label || period;
+    const periodLabel = (period: string) => {
+        if (isChinese) {
+            const map: Record<string, string> = { permanent: '永久', daily: '每天', weekly: '每周', monthly: '每月' };
+            return map[period] || period;
+        }
+        return PERIOD_OPTIONS.find(p => p.value === period)?.label || period;
+    };
+
+    const formatDate = (iso?: string) => {
+        if (!iso) return '—';
+        const d = new Date(iso);
+        return d.toLocaleDateString(isChinese ? 'zh-CN' : 'en-US', { year: 'numeric', month: '2-digit', day: '2-digit' });
+    };
+
+    // Sort
+    const sorted = [...users].sort((a, b) => {
+        const ta = a.created_at ? new Date(a.created_at).getTime() : 0;
+        const tb = b.created_at ? new Date(b.created_at).getTime() : 0;
+        return sortOrder === 'asc' ? ta - tb : tb - ta;
+    });
+
+    // Paginate
+    const totalPages = Math.max(1, Math.ceil(sorted.length / PAGE_SIZE));
+    const paged = sorted.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE);
+
+    const toggleSort = () => {
+        setSortOrder(o => o === 'asc' ? 'desc' : 'asc');
+        setPage(1);
+    };
 
     return (
         <div>
@@ -115,26 +154,40 @@ export default function UserManagement() {
                 </div>
             ) : (
                 <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                    {/* Summary row */}
+                    <div style={{ fontSize: '12px', color: 'var(--text-tertiary)', marginBottom: '4px' }}>
+                        {isChinese ? `共 ${users.length} 位用户` : `${users.length} users total`}
+                    </div>
+
                     {/* Header */}
                     <div style={{
-                        display: 'grid', gridTemplateColumns: '1.5fr 1.5fr 1fr 1fr 1fr 1fr 120px',
-                        gap: '12px', padding: '10px 16px', fontSize: '11px', fontWeight: 600,
+                        display: 'grid', gridTemplateColumns: '1.4fr 1.4fr 0.8fr 0.9fr 0.8fr 0.8fr 0.8fr 0.8fr 100px',
+                        gap: '10px', padding: '10px 16px', fontSize: '11px', fontWeight: 600,
                         color: 'var(--text-tertiary)', textTransform: 'uppercase', letterSpacing: '0.05em',
                     }}>
-                        <div>{t('enterprise.users.user', 'User')}</div>
+                        <div>{t('enterprise.users.user', isChinese ? '用户' : 'User')}</div>
                         <div>{t('enterprise.users.email', 'Email')}</div>
-                        <div>{t('enterprise.users.msgQuota', 'Msg Quota')}</div>
-                        <div>{t('enterprise.users.period', 'Period')}</div>
-                        <div>{t('enterprise.users.agents', 'Agents')}</div>
-                        <div>{t('enterprise.users.ttl', 'Agent TTL')}</div>
+                        {/* Created At with sort toggle */}
+                        <div
+                            style={{ cursor: 'pointer', userSelect: 'none', display: 'flex', alignItems: 'center', gap: '3px' }}
+                            onClick={toggleSort}
+                            title={isChinese ? '点击切换排序' : 'Click to toggle sort order'}
+                        >
+                            {isChinese ? '注册时间' : 'Joined'} {sortOrder === 'asc' ? '↑' : '↓'}
+                        </div>
+                        <div>{isChinese ? '来源' : 'Source'}</div>
+                        <div>{t('enterprise.users.msgQuota', isChinese ? '消息配额' : 'Msg Quota')}</div>
+                        <div>{t('enterprise.users.period', isChinese ? '周期' : 'Period')}</div>
+                        <div>{t('enterprise.users.agents', isChinese ? '数字员工' : 'Agents')}</div>
+                        <div>{t('enterprise.users.ttl', 'TTL')}</div>
                         <div></div>
                     </div>
 
-                    {users.map(user => (
+                    {paged.map(user => (
                         <div key={user.id}>
                             <div className="card" style={{
-                                display: 'grid', gridTemplateColumns: '1.5fr 1.5fr 1fr 1fr 1fr 1fr 120px',
-                                gap: '12px', alignItems: 'center', padding: '12px 16px',
+                                display: 'grid', gridTemplateColumns: '1.4fr 1.4fr 0.8fr 0.9fr 0.8fr 0.8fr 0.8fr 0.8fr 100px',
+                                gap: '10px', alignItems: 'center', padding: '12px 16px',
                             }}>
                                 <div>
                                     <div style={{ fontWeight: 500, fontSize: '14px' }}>
@@ -146,6 +199,18 @@ export default function UserManagement() {
                                     <div style={{ fontSize: '11px', color: 'var(--text-tertiary)' }}>@{user.username}</div>
                                 </div>
                                 <div style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>{user.email}</div>
+                                <div style={{ fontSize: '11px', color: 'var(--text-secondary)' }}>{formatDate(user.created_at)}</div>
+                                <div>
+                                    {user.source === 'feishu' ? (
+                                        <span style={{ fontSize: '10px', background: 'rgba(58,132,255,0.12)', color: '#3a84ff', borderRadius: '4px', padding: '2px 7px', whiteSpace: 'nowrap' }}>
+                                            飞书
+                                        </span>
+                                    ) : (
+                                        <span style={{ fontSize: '10px', background: 'rgba(0,180,120,0.12)', color: 'var(--success)', borderRadius: '4px', padding: '2px 7px', whiteSpace: 'nowrap' }}>
+                                            {isChinese ? '注册' : 'Reg'}
+                                        </span>
+                                    )}
+                                </div>
                                 <div>
                                     <span style={{ fontSize: '13px', fontWeight: 500 }}>{user.quota_messages_used}</span>
                                     <span style={{ fontSize: '11px', color: 'var(--text-tertiary)' }}> / {user.quota_message_limit}</span>
@@ -179,7 +244,7 @@ export default function UserManagement() {
                                     <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr 1fr', gap: '16px' }}>
                                         <div className="form-group">
                                             <label className="form-label" style={{ fontSize: '11px' }}>
-                                                {t('enterprise.users.msgLimit', 'Message Limit')}
+                                                {t('enterprise.users.msgLimit', isChinese ? '消息限额' : 'Message Limit')}
                                             </label>
                                             <input
                                                 className="form-input"
@@ -190,7 +255,7 @@ export default function UserManagement() {
                                         </div>
                                         <div className="form-group">
                                             <label className="form-label" style={{ fontSize: '11px' }}>
-                                                {t('enterprise.users.period', 'Period')}
+                                                {t('enterprise.users.period', isChinese ? '重置周期' : 'Period')}
                                             </label>
                                             <select
                                                 className="form-input"
@@ -198,13 +263,13 @@ export default function UserManagement() {
                                                 onChange={e => setEditForm({ ...editForm, quota_message_period: e.target.value })}
                                             >
                                                 {PERIOD_OPTIONS.map(p => (
-                                                    <option key={p.value} value={p.value}>{p.label}</option>
+                                                    <option key={p.value} value={p.value}>{periodLabel(p.value)}</option>
                                                 ))}
                                             </select>
                                         </div>
                                         <div className="form-group">
                                             <label className="form-label" style={{ fontSize: '11px' }}>
-                                                {t('enterprise.users.maxAgents', 'Max Agents')}
+                                                {t('enterprise.users.maxAgents', isChinese ? '最多数字员工' : 'Max Agents')}
                                             </label>
                                             <input
                                                 className="form-input"
@@ -215,7 +280,7 @@ export default function UserManagement() {
                                         </div>
                                         <div className="form-group">
                                             <label className="form-label" style={{ fontSize: '11px' }}>
-                                                {t('enterprise.users.agentTTL', 'Agent TTL (hours)')}
+                                                {t('enterprise.users.agentTTL', isChinese ? '员工存活时长(h)' : 'Agent TTL (hours)')}
                                             </label>
                                             <input
                                                 className="form-input"
@@ -241,6 +306,38 @@ export default function UserManagement() {
                     {users.length === 0 && (
                         <div style={{ textAlign: 'center', padding: '40px', color: 'var(--text-tertiary)' }}>
                             {t('common.noData')}
+                        </div>
+                    )}
+
+                    {/* Pagination */}
+                    {totalPages > 1 && (
+                        <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', gap: '8px', marginTop: '16px' }}>
+                            <button
+                                className="btn btn-secondary"
+                                style={{ padding: '4px 10px', fontSize: '12px' }}
+                                disabled={page <= 1}
+                                onClick={() => setPage(p => p - 1)}
+                            >
+                                ‹ {isChinese ? '上一页' : 'Prev'}
+                            </button>
+                            {Array.from({ length: totalPages }, (_, i) => i + 1).map(p => (
+                                <button
+                                    key={p}
+                                    className={`btn ${p === page ? 'btn-primary' : 'btn-secondary'}`}
+                                    style={{ padding: '4px 10px', fontSize: '12px', minWidth: '32px' }}
+                                    onClick={() => setPage(p)}
+                                >
+                                    {p}
+                                </button>
+                            ))}
+                            <button
+                                className="btn btn-secondary"
+                                style={{ padding: '4px 10px', fontSize: '12px' }}
+                                disabled={page >= totalPages}
+                                onClick={() => setPage(p => p + 1)}
+                            >
+                                {isChinese ? '下一页' : 'Next'} ›
+                            </button>
                         </div>
                     )}
                 </div>
