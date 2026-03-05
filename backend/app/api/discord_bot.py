@@ -1,5 +1,6 @@
 """Discord Bot Channel API routes (slash command interactions)."""
 
+import os
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
