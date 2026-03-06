@@ -550,11 +550,21 @@ export default function AgentDetail() {
         setChatMessages([]);
         setHistoryMsgs([]);
         setActiveSession(sess);
-        // If it's not the live session (different user), load messages statically
-        if (sess.user_id !== currentUser?.id) {
-            const tkn = localStorage.getItem('token');
-            const res = await fetch(`/api/agents/${id}/sessions/${sess.id}/messages`, { headers: { Authorization: `Bearer ${tkn}` } });
-            if (res.ok) setHistoryMsgs(await res.json());
+        // Always load stored messages for the selected session
+        const tkn = localStorage.getItem('token');
+        const res = await fetch(`/api/agents/${id}/sessions/${sess.id}/messages`, { headers: { Authorization: `Bearer ${tkn}` } });
+        if (res.ok) {
+            const msgs = await res.json();
+            if (sess.user_id === String(currentUser?.id)) {
+                // Own session: load into chatMessages so WS can append new replies seamlessly
+                setChatMessages(msgs.map((m: any) => ({
+                    role: m.role, content: m.content,
+                    ...(m.toolName && { toolName: m.toolName, toolArgs: m.toolArgs, toolStatus: m.toolStatus, toolResult: m.toolResult }),
+                })));
+            } else {
+                // Other user's session: read-only view
+                setHistoryMsgs(msgs);
+            }
         }
     };
 
