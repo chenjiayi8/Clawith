@@ -46,6 +46,11 @@ async def _execute_schedule(schedule_id: uuid.UUID, agent_id: uuid.UUID, instruc
                 logger.info(f"Schedule {schedule_id}: agent {agent.name} not running, skipping")
                 return
 
+            from app.core.permissions import is_agent_expired
+            if is_agent_expired(agent):
+                logger.info(f"Schedule {schedule_id}: agent {agent.name} has expired, skipping")
+                return
+
             model_id = agent.primary_model_id or agent.fallback_model_id
             if not model_id:
                 logger.warning(f"Schedule {schedule_id}: agent {agent.name} has no LLM model")

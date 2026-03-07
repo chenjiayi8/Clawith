@@ -8,7 +8,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.permissions import check_agent_access, is_agent_creator
+from app.core.permissions import check_agent_access, is_agent_creator, is_agent_expired
 from app.core.security import get_current_user, require_role
 from app.database import get_db
 from app.models.schedule import AgentSchedule
@@ -161,6 +161,8 @@ async def trigger_schedule(
 ):
     """Manually trigger a schedule execution."""
     agent, _access = await check_agent_access(db, current_user, agent_id)
+    if is_agent_expired(agent):
+        raise HTTPException(status_code=403, detail="Agent has expired and cannot be triggered.")
 
     result = await db.execute(
         select(AgentSchedule).where(AgentSchedule.id == schedule_id, AgentSchedule.agent_id == agent_id)

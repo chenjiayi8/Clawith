@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.core.security import decode_access_token
-from app.core.permissions import check_agent_access
+from app.core.permissions import check_agent_access, is_agent_expired
 from app.database import async_session
 from app.models.agent import Agent
 from app.models.audit import ChatMessage
@@ -386,6 +386,11 @@ async def websocket_chat(
 
             print(f"[WS] Checking agent access for {agent_id}")
             agent, _ = await check_agent_access(db, user, agent_id)
+            # Check agent expiry
+            if is_agent_expired(agent):
+                await websocket.send_json({"type": "error", "content": "This Agent has expired and is off duty. Please contact your admin to extend its service."})
+                await websocket.close(code=4003)
+                return
             agent_name = agent.name
             role_description = agent.role_description or ""
             ctx_size = agent.context_window_size or 100
