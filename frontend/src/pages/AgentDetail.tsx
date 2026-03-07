@@ -917,6 +917,7 @@ export default function AgentDetail() {
 
     // ─── Channel config — Feishu ────────────────────────
     const [channelForm, setChannelForm] = useState({ app_id: '', app_secret: '', encrypt_key: '' });
+    const [feishuEditing, setFeishuEditing] = useState(false);
 
     const saveChannel = useMutation({
         mutationFn: () => channelApi.create(id!, {
@@ -928,6 +929,7 @@ export default function AgentDetail() {
 
     // ─── Channel config — Slack ──────────────────────────
     const [slackForm, setSlackForm] = useState({ bot_token: '', signing_secret: '' });
+    const [slackEditing, setSlackEditing] = useState(false);
     const { data: slackConfig } = useQuery({
         queryKey: ['slack-channel', id],
         queryFn: () => fetchAuth<any>(`/agents/${id}/slack-channel`).catch(() => null),
@@ -949,6 +951,10 @@ export default function AgentDetail() {
 
     // ─── Channel config — Discord ────────────────────────
     const [discordForm, setDiscordForm] = useState({ application_id: '', bot_token: '', public_key: '' });
+    const [discordEditing, setDiscordEditing] = useState(false);
+    // Shared password-field visibility map: key = field id, value = shown/hidden
+    const [showPwds, setShowPwds] = useState<Record<string, boolean>>({});
+    const togglePwd = (fieldId: string) => setShowPwds(p => ({ ...p, [fieldId]: !p[fieldId] }));
     const { data: discordConfig } = useQuery({
         queryKey: ['discord-channel', id],
         queryFn: () => fetchAuth<any>(`/agents/${id}/discord-channel`).catch(() => null),
@@ -2561,7 +2567,7 @@ export default function AgentDetail() {
                                             </div>
                                             {slackConfig && <span className={`badge ${slackConfig.is_configured ? 'badge-success' : 'badge-warning'}`}>{slackConfig.is_configured ? t('agent.settings.channel.configured') : t('agent.settings.channel.notConfigured')}</span>}
                                         </div>
-                                        {slackConfig?.is_configured ? (
+                                        {slackConfig?.is_configured && !slackEditing ? (
                                             <div>
                                                 <div style={{ background: 'var(--bg-secondary)', borderRadius: '6px', padding: '10px', fontSize: '12px', fontFamily: 'var(--font-mono)', marginBottom: '12px' }}>
                                                     <div style={{ color: 'var(--text-tertiary)', marginBottom: '6px' }}>Webhook URL (Event Subscriptions URL)</div>
@@ -2586,17 +2592,26 @@ export default function AgentDetail() {
                                                     </ol>
                                                     <div style={{ fontSize: '11px', color: 'var(--text-tertiary)', background: 'var(--bg-secondary)', padding: '6px 10px', borderRadius: '6px' }}>💡 {t('channelGuide.slack.note')}</div>
                                                 </details>
-                                                <button className="btn btn-danger" style={{ fontSize: '12px', padding: '4px 12px' }} onClick={() => deleteSlack.mutate()}>Disconnect</button>
+                                                <div style={{ display: 'flex', gap: '8px' }}>
+                                                    <button className="btn btn-secondary" style={{ fontSize: '12px', padding: '4px 12px' }} onClick={() => { setSlackForm({ bot_token: '', signing_secret: '' }); setSlackEditing(true); }}>Edit</button>
+                                                    <button className="btn btn-danger" style={{ fontSize: '12px', padding: '4px 12px' }} onClick={() => deleteSlack.mutate()}>Disconnect</button>
+                                                </div>
                                             </div>
                                         ) : (
                                             <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
                                                 <div>
                                                     <label style={{ fontSize: '12px', fontWeight: 500, display: 'block', marginBottom: '4px' }}>Bot Token *</label>
-                                                    <input className="input" value={slackForm.bot_token} onChange={e => setSlackForm({ ...slackForm, bot_token: e.target.value })} placeholder="xoxb-..." style={{ fontSize: '12px' }} />
+                                                    <div style={{ position: 'relative' }}>
+                                                        <input className="input" type={showPwds['slack_token'] ? 'text' : 'password'} value={slackForm.bot_token} onChange={e => setSlackForm({ ...slackForm, bot_token: e.target.value })} placeholder="xoxb-..." style={{ fontSize: '12px', paddingRight: '36px' }} />
+                                                        <button type="button" onClick={() => togglePwd('slack_token')} style={{ position: 'absolute', right: '8px', top: '50%', transform: 'translateY(-50%)', background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-tertiary)', padding: '2px', display: 'flex', alignItems: 'center' }}>{showPwds['slack_token'] ? <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M17.94 17.94A10.07 10.07 0 0112 20c-7 0-11-8-11-8a18.45 18.45 0 015.06-5.94" /><path d="M9.9 4.24A9.12 9.12 0 0112 4c7 0 11 8 11 8a18.5 18.5 0 01-2.16 3.19" /><line x1="1" y1="1" x2="23" y2="23" /></svg> : <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" /><circle cx="12" cy="12" r="3" /></svg>}</button>
+                                                    </div>
                                                 </div>
                                                 <div>
                                                     <label style={{ fontSize: '12px', fontWeight: 500, display: 'block', marginBottom: '4px' }}>Signing Secret *</label>
-                                                    <input className="input" type="password" value={slackForm.signing_secret} onChange={e => setSlackForm({ ...slackForm, signing_secret: e.target.value })} style={{ fontSize: '12px' }} />
+                                                    <div style={{ position: 'relative' }}>
+                                                        <input className="input" type={showPwds['slack_secret'] ? 'text' : 'password'} value={slackForm.signing_secret} onChange={e => setSlackForm({ ...slackForm, signing_secret: e.target.value })} style={{ fontSize: '12px', paddingRight: '36px' }} />
+                                                        <button type="button" onClick={() => togglePwd('slack_secret')} style={{ position: 'absolute', right: '8px', top: '50%', transform: 'translateY(-50%)', background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-tertiary)', padding: '2px', display: 'flex', alignItems: 'center' }}>{showPwds['slack_secret'] ? <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M17.94 17.94A10.07 10.07 0 0112 20c-7 0-11-8-11-8a18.45 18.45 0 015.06-5.94" /><path d="M9.9 4.24A9.12 9.12 0 0112 4c7 0 11 8 11 8a18.5 18.5 0 01-2.16 3.19" /><line x1="1" y1="1" x2="23" y2="23" /></svg> : <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" /><circle cx="12" cy="12" r="3" /></svg>}</button>
+                                                    </div>
                                                 </div>
                                                 <details style={{ marginBottom: '8px', fontSize: '12px', color: 'var(--text-secondary)' }}>
                                                     <summary style={{ cursor: 'pointer', fontWeight: 500, color: 'var(--text-primary)', userSelect: 'none', listStyle: 'none', display: 'flex', alignItems: 'center', gap: '6px' }}>
@@ -2614,9 +2629,12 @@ export default function AgentDetail() {
                                                     </ol>
                                                     <div style={{ fontSize: '11px', color: 'var(--text-tertiary)', background: 'var(--bg-secondary)', padding: '6px 10px', borderRadius: '6px' }}>💡 {t('channelGuide.slack.note')}</div>
                                                 </details>
-                                                <button className="btn btn-primary" style={{ fontSize: '12px', alignSelf: 'flex-start' }} onClick={() => saveSlack.mutate()} disabled={!slackForm.bot_token || !slackForm.signing_secret || saveSlack.isPending}>
-                                                    {saveSlack.isPending ? t('common.loading') : t('agent.settings.channel.saveChannel')}
-                                                </button>
+                                                <div style={{ display: 'flex', gap: '8px' }}>
+                                                    <button className="btn btn-primary" style={{ fontSize: '12px', alignSelf: 'flex-start' }} onClick={() => { saveSlack.mutate(); setSlackEditing(false); }} disabled={!slackForm.bot_token || !slackForm.signing_secret || saveSlack.isPending}>
+                                                        {saveSlack.isPending ? t('common.loading') : (slackEditing ? 'Save Changes' : t('agent.settings.channel.saveChannel'))}
+                                                    </button>
+                                                    {slackEditing && <button className="btn btn-secondary" style={{ fontSize: '12px' }} onClick={() => setSlackEditing(false)}>Cancel</button>}
+                                                </div>
                                             </div>
                                         )}
                                     </div>
@@ -2633,7 +2651,7 @@ export default function AgentDetail() {
                                             </div>
                                             {discordConfig && <span className={`badge ${discordConfig.is_configured ? 'badge-success' : 'badge-warning'}`}>{discordConfig.is_configured ? t('agent.settings.channel.configured') : t('agent.settings.channel.notConfigured')}</span>}
                                         </div>
-                                        {discordConfig?.is_configured ? (
+                                        {discordConfig?.is_configured && !discordEditing ? (
                                             <div>
                                                 <div style={{ background: 'var(--bg-secondary)', borderRadius: '6px', padding: '10px', fontSize: '12px', fontFamily: 'var(--font-mono)', marginBottom: '12px' }}>
                                                     <div style={{ color: 'var(--text-tertiary)', marginBottom: '6px' }}>Interactions Endpoint URL</div>
@@ -2658,7 +2676,10 @@ export default function AgentDetail() {
                                                     </ol>
                                                     <div style={{ fontSize: '11px', color: 'var(--text-tertiary)', background: 'var(--bg-secondary)', padding: '6px 10px', borderRadius: '6px' }}>💡 {t('channelGuide.discord.note')}</div>
                                                 </details>
-                                                <button className="btn btn-danger" style={{ fontSize: '12px', padding: '4px 12px' }} onClick={() => deleteDiscord.mutate()}>Disconnect</button>
+                                                <div style={{ display: 'flex', gap: '8px' }}>
+                                                    <button className="btn btn-secondary" style={{ fontSize: '12px', padding: '4px 12px' }} onClick={() => { setDiscordForm({ application_id: discordConfig?.app_id || '', bot_token: '', public_key: '' }); setDiscordEditing(true); }}>Edit</button>
+                                                    <button className="btn btn-danger" style={{ fontSize: '12px', padding: '4px 12px' }} onClick={() => deleteDiscord.mutate()}>Disconnect</button>
+                                                </div>
                                             </div>
                                         ) : (
                                             <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
@@ -2668,7 +2689,10 @@ export default function AgentDetail() {
                                                 </div>
                                                 <div>
                                                     <label style={{ fontSize: '12px', fontWeight: 500, display: 'block', marginBottom: '4px' }}>Bot Token *</label>
-                                                    <input className="input" type="password" value={discordForm.bot_token} onChange={e => setDiscordForm({ ...discordForm, bot_token: e.target.value })} style={{ fontSize: '12px' }} />
+                                                    <div style={{ position: 'relative' }}>
+                                                        <input className="input" type={showPwds['disc_token'] ? 'text' : 'password'} value={discordForm.bot_token} onChange={e => setDiscordForm({ ...discordForm, bot_token: e.target.value })} style={{ fontSize: '12px', paddingRight: '36px' }} />
+                                                        <button type="button" onClick={() => togglePwd('disc_token')} style={{ position: 'absolute', right: '8px', top: '50%', transform: 'translateY(-50%)', background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-tertiary)', padding: '2px', display: 'flex', alignItems: 'center' }}>{showPwds['disc_token'] ? <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M17.94 17.94A10.07 10.07 0 0112 20c-7 0-11-8-11-8a18.45 18.45 0 015.06-5.94" /><path d="M9.9 4.24A9.12 9.12 0 0112 4c7 0 11 8 11 8a18.5 18.5 0 01-2.16 3.19" /><line x1="1" y1="1" x2="23" y2="23" /></svg> : <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" /><circle cx="12" cy="12" r="3" /></svg>}</button>
+                                                    </div>
                                                 </div>
                                                 <div>
                                                     <label style={{ fontSize: '12px', fontWeight: 500, display: 'block', marginBottom: '4px' }}>Public Key *</label>
@@ -2689,9 +2713,12 @@ export default function AgentDetail() {
                                                     </ol>
                                                     <div style={{ fontSize: '11px', color: 'var(--text-tertiary)', background: 'var(--bg-secondary)', padding: '6px 10px', borderRadius: '6px' }}>💡 {t('channelGuide.discord.note')}</div>
                                                 </details>
-                                                <button className="btn btn-primary" style={{ fontSize: '12px', alignSelf: 'flex-start' }} onClick={() => saveDiscord.mutate()} disabled={!discordForm.application_id || !discordForm.bot_token || !discordForm.public_key || saveDiscord.isPending}>
-                                                    {saveDiscord.isPending ? t('common.loading') : t('agent.settings.channel.saveChannel')}
-                                                </button>
+                                                <div style={{ display: 'flex', gap: '8px' }}>
+                                                    <button className="btn btn-primary" style={{ fontSize: '12px', alignSelf: 'flex-start' }} onClick={() => { saveDiscord.mutate(); setDiscordEditing(false); }} disabled={!discordForm.application_id || !discordForm.bot_token || !discordForm.public_key || saveDiscord.isPending}>
+                                                        {saveDiscord.isPending ? t('common.loading') : (discordEditing ? 'Save Changes' : t('agent.settings.channel.saveChannel'))}
+                                                    </button>
+                                                    {discordEditing && <button className="btn btn-secondary" style={{ fontSize: '12px' }} onClick={() => setDiscordEditing(false)}>Cancel</button>}
+                                                </div>
                                             </div>
                                         )}
                                     </div>
@@ -2713,7 +2740,7 @@ export default function AgentDetail() {
                                             )}
                                         </div>
 
-                                        {channelConfig ? (
+                                        {channelConfig && !feishuEditing ? (
                                             <div>
                                                 <div style={{ fontSize: '12px', color: 'var(--text-tertiary)', marginBottom: '8px' }}>App ID: <code>{channelConfig.app_id}</code></div>
                                                 <div style={{ background: 'var(--bg-secondary)', borderRadius: '6px', padding: '10px', fontSize: '12px', fontFamily: 'var(--font-mono)', marginBottom: '12px' }}>
@@ -2759,7 +2786,10 @@ export default function AgentDetail() {
                                                     </ol>
                                                     <div style={{ fontSize: '11px', color: 'var(--text-tertiary)', background: 'var(--bg-secondary)', padding: '6px 10px', borderRadius: '6px' }}>💡 {t('channelGuide.feishu.note')}</div>
                                                 </details>
-                                                <button className="btn btn-danger" style={{ fontSize: '12px', padding: '4px 12px' }} onClick={async () => { await channelApi.delete(id!); queryClient.invalidateQueries({ queryKey: ['channel', id] }); }}>Disconnect</button>
+                                                <div style={{ display: 'flex', gap: '8px' }}>
+                                                    <button className="btn btn-secondary" style={{ fontSize: '12px', padding: '4px 12px' }} onClick={() => { setChannelForm({ app_id: channelConfig.app_id || '', app_secret: '', encrypt_key: '' }); setFeishuEditing(true); }}>Edit</button>
+                                                    <button className="btn btn-danger" style={{ fontSize: '12px', padding: '4px 12px' }} onClick={async () => { await channelApi.delete(id!); queryClient.invalidateQueries({ queryKey: ['channel', id] }); }}>Disconnect</button>
+                                                </div>
                                             </div>
                                         ) : (
                                             <div>
@@ -2770,11 +2800,17 @@ export default function AgentDetail() {
                                                     </div>
                                                     <div>
                                                         <label style={{ fontSize: '12px', fontWeight: 500, display: 'block', marginBottom: '4px' }}>App Secret *</label>
-                                                        <input className="input" type="password" value={channelForm.app_secret} onChange={e => setChannelForm({ ...channelForm, app_secret: e.target.value })} style={{ fontSize: '12px' }} />
+                                                        <div style={{ position: 'relative' }}>
+                                                            <input className="input" type={showPwds['feishu_secret'] ? 'text' : 'password'} value={channelForm.app_secret} onChange={e => setChannelForm({ ...channelForm, app_secret: e.target.value })} style={{ fontSize: '12px', paddingRight: '36px' }} />
+                                                            <button type="button" onClick={() => togglePwd('feishu_secret')} style={{ position: 'absolute', right: '8px', top: '50%', transform: 'translateY(-50%)', background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-tertiary)', padding: '2px', display: 'flex', alignItems: 'center' }}>{showPwds['feishu_secret'] ? <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M17.94 17.94A10.07 10.07 0 0112 20c-7 0-11-8-11-8a18.45 18.45 0 015.06-5.94" /><path d="M9.9 4.24A9.12 9.12 0 0112 4c7 0 11 8 11 8a18.5 18.5 0 01-2.16 3.19" /><line x1="1" y1="1" x2="23" y2="23" /></svg> : <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" /><circle cx="12" cy="12" r="3" /></svg>}</button>
+                                                        </div>
                                                     </div>
                                                     <div>
                                                         <label style={{ fontSize: '12px', fontWeight: 500, display: 'block', marginBottom: '4px' }}>Encrypt Key</label>
-                                                        <input className="input" value={channelForm.encrypt_key} onChange={e => setChannelForm({ ...channelForm, encrypt_key: e.target.value })} style={{ fontSize: '12px' }} />
+                                                        <div style={{ position: 'relative' }}>
+                                                            <input className="input" type={showPwds['feishu_encrypt'] ? 'text' : 'password'} value={channelForm.encrypt_key} onChange={e => setChannelForm({ ...channelForm, encrypt_key: e.target.value })} style={{ fontSize: '12px', paddingRight: '36px' }} />
+                                                            <button type="button" onClick={() => togglePwd('feishu_encrypt')} style={{ position: 'absolute', right: '8px', top: '50%', transform: 'translateY(-50%)', background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-tertiary)', padding: '2px', display: 'flex', alignItems: 'center' }}>{showPwds['feishu_encrypt'] ? <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M17.94 17.94A10.07 10.07 0 0112 20c-7 0-11-8-11-8a18.45 18.45 0 015.06-5.94" /><path d="M9.9 4.24A9.12 9.12 0 0112 4c7 0 11 8 11 8a18.5 18.5 0 01-2.16 3.19" /><line x1="1" y1="1" x2="23" y2="23" /></svg> : <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" /><circle cx="12" cy="12" r="3" /></svg>}</button>
+                                                        </div>
                                                     </div>
                                                 </div>
                                                 <details style={{ marginBottom: '8px', fontSize: '12px', color: 'var(--text-secondary)' }}>
@@ -2793,9 +2829,12 @@ export default function AgentDetail() {
                                                     </ol>
                                                     <div style={{ fontSize: '11px', color: 'var(--text-tertiary)', background: 'var(--bg-secondary)', padding: '6px 10px', borderRadius: '6px' }}>💡 {t('channelGuide.feishu.note')}</div>
                                                 </details>
-                                                <button className="btn btn-primary" style={{ fontSize: '12px' }} onClick={() => saveChannel.mutate()} disabled={!channelForm.app_id || !channelForm.app_secret || saveChannel.isPending}>
-                                                    {saveChannel.isPending ? t('common.loading') : t('agent.settings.channel.saveChannel')}
-                                                </button>
+                                                <div style={{ display: 'flex', gap: '8px' }}>
+                                                    <button className="btn btn-primary" style={{ fontSize: '12px' }} onClick={() => { saveChannel.mutate(); setFeishuEditing(false); }} disabled={!channelForm.app_id || !channelForm.app_secret || saveChannel.isPending}>
+                                                        {saveChannel.isPending ? t('common.loading') : (feishuEditing ? 'Save Changes' : t('agent.settings.channel.saveChannel'))}
+                                                    </button>
+                                                    {feishuEditing && <button className="btn btn-secondary" style={{ fontSize: '12px' }} onClick={() => setFeishuEditing(false)}>Cancel</button>}
+                                                </div>
                                             </div>
                                         )}
                                     </div>
