@@ -163,6 +163,7 @@ class TaskOut(BaseModel):
     priority: str
     assignee: str
     created_by: uuid.UUID
+    creator_username: str | None = None
     due_date: datetime | None = None
     supervision_target_name: str | None = None
     supervision_channel: str | None = None
@@ -180,6 +181,8 @@ class TaskUpdate(BaseModel):
     status: str | None = None
     priority: str | None = None
     due_date: datetime | None = None
+    supervision_target_name: str | None = None
+    remind_schedule: str | None = None
 
 
 class TaskLogCreate(BaseModel):

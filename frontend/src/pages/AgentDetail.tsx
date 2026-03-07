@@ -1551,19 +1551,23 @@ export default function AgentDetail() {
                                                     <div style={{ marginBottom: '12px' }}>
                                                         <div style={{ fontSize: '10px', fontWeight: 600, color: 'var(--text-tertiary)', marginBottom: '6px', padding: '2px 0' }}>Tasks</div>
                                                         {colTasks.map(task => (
-                                                            <div key={task.id} className="card" style={{ marginBottom: '6px', padding: '10px', cursor: 'pointer', border: selectedTaskId === task.id ? '1px solid var(--accent)' : '1px solid transparent' }} onClick={() => setSelectedTaskId(selectedTaskId === task.id ? null : task.id)}>
-                                                                <div style={{ fontSize: '12px', fontWeight: 500 }}>{task.title}</div>
-                                                                <div style={{ display: 'flex', gap: '4px', marginTop: '6px' }}>
+                                                            <div key={task.id} className="card" style={{ marginBottom: '6px', padding: '10px 12px', cursor: 'pointer', border: selectedTaskId === task.id ? '1px solid var(--accent-primary)' : '1px solid transparent' }} onClick={() => setSelectedTaskId(selectedTaskId === task.id ? null : task.id)}>
+                                                                <div style={{ display: 'flex', alignItems: 'center', gap: '6px', marginBottom: '2px' }}>
+                                                                    <span style={{ fontSize: '12px', fontWeight: 500, flex: 1 }}>{task.title}</span>
+                                                                    {task.creator_username && <span style={{ fontSize: '10px', color: 'var(--text-tertiary)', background: 'var(--bg-tertiary)', borderRadius: '4px', padding: '1px 5px' }}>@{task.creator_username}</span>}
+                                                                </div>
+                                                                <div style={{ display: 'flex', gap: '4px', marginTop: '4px' }}>
                                                                     <span className={`badge badge-${task.priority === 'high' || task.priority === 'urgent' ? 'error' : 'info'}`} style={{ fontSize: '10px' }}>
                                                                         {task.priority}
                                                                     </span>
                                                                 </div>
                                                                 {selectedTaskId === task.id && taskLogs.length > 0 && (
                                                                     <div style={{ marginTop: '8px', borderTop: '1px solid var(--border-subtle)', paddingTop: '8px' }}>
+                                                                        <div style={{ fontSize: '10px', fontWeight: 600, color: 'var(--text-tertiary)', marginBottom: '6px' }}>Execution History</div>
                                                                         {taskLogs.map(log => (
                                                                             <div key={log.id} style={{ fontSize: '11px', color: 'var(--text-secondary)', marginBottom: '6px', whiteSpace: 'pre-wrap', lineHeight: 1.5 }}>
                                                                                 <div style={{ fontSize: '10px', color: 'var(--text-tertiary)', marginBottom: '2px' }}>
-                                                                                    {new Date(log.created_at).toLocaleTimeString('zh-CN')}
+                                                                                    {new Date(log.created_at).toLocaleString('zh-CN', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}
                                                                                 </div>
                                                                                 {log.content}
                                                                             </div>
@@ -1571,7 +1575,7 @@ export default function AgentDetail() {
                                                                     </div>
                                                                 )}
                                                                 {selectedTaskId === task.id && taskLogs.length === 0 && (
-                                                                    <div style={{ marginTop: '8px', fontSize: '11px', color: 'var(--text-tertiary)' }}>No logs</div>
+                                                                    <div style={{ marginTop: '8px', fontSize: '11px', color: 'var(--text-tertiary)' }}>No execution history</div>
                                                                 )}
                                                             </div>
                                                         ))}
@@ -1584,29 +1588,30 @@ export default function AgentDetail() {
                                                     {schedules.length > 0 ? schedules.map((s: any) => {
                                                         const formatDt = (iso: string) => !iso ? '-' : new Date(iso).toLocaleString('zh-CN', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
                                                         return (
-                                                            <div key={s.id} className="card" style={{ marginBottom: '6px', padding: '10px', borderLeft: `3px solid ${s.is_enabled ? 'var(--accent)' : 'var(--text-tertiary)'}` }}>
+                                                            <div key={s.id} className="card" style={{ marginBottom: '6px', padding: '10px 12px', borderLeft: `3px solid ${s.is_enabled ? 'var(--accent-primary)' : 'var(--text-tertiary)'}`, opacity: s.is_enabled ? 1 : 0.6 }}>
                                                                 <div style={{ display: 'flex', alignItems: 'center', gap: '6px', marginBottom: '4px' }}>
-                                                                    <span style={{ fontSize: '12px' }}>{s.is_enabled ? '⏰' : '⏸️'}</span>
+                                                                    <span style={{ fontSize: '13px' }}>{s.is_enabled ? '⏰' : '⏸️'}</span>
                                                                     <span style={{ fontWeight: 500, fontSize: '12px', flex: 1 }}>{s.name}</span>
+                                                                    {s.creator_username && <span style={{ fontSize: '10px', color: 'var(--text-tertiary)', background: 'var(--bg-tertiary)', borderRadius: '4px', padding: '1px 5px' }}>@{s.creator_username}</span>}
                                                                 </div>
-                                                                <div style={{ fontSize: '11px', color: 'var(--text-secondary)', marginBottom: '4px', lineHeight: 1.3 }}>
-                                                                    {s.instruction.length > 50 ? s.instruction.slice(0, 50) + '...' : s.instruction}
-                                                                </div>
-                                                                <div style={{ display: 'flex', alignItems: 'center', gap: '4px', flexWrap: 'wrap' }}>
-                                                                    <code style={{ fontSize: '10px', background: 'var(--bg-elevated)', padding: '1px 4px', borderRadius: '3px' }}>{s.cron_expr}</code>
-                                                                    <span style={{ fontSize: '10px', color: 'var(--text-tertiary)' }}>Next: {formatDt(s.next_run_at)}</span>
+                                                                {s.instruction && (
+                                                                    <div style={{ fontSize: '11px', color: 'var(--text-secondary)', marginBottom: '4px', lineHeight: 1.4, overflow: 'hidden', display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical' as any }}>
+                                                                        {s.instruction}
+                                                                    </div>
+                                                                )}
+                                                                <div style={{ display: 'flex', alignItems: 'center', gap: '6px', flexWrap: 'wrap', marginBottom: '6px' }}>
+                                                                    <code style={{ fontSize: '10px', background: 'var(--bg-tertiary)', padding: '1px 5px', borderRadius: '3px', color: 'var(--text-secondary)' }}>{s.cron_expr}</code>
+                                                                    {s.next_run_at && <span style={{ fontSize: '10px', color: 'var(--text-tertiary)' }}>Next: {formatDt(s.next_run_at)}</span>}
                                                                     {s.run_count > 0 && <span style={{ fontSize: '10px', color: 'var(--text-tertiary)' }}>· {s.run_count}x</span>}
+                                                                    {s.last_run_at && <span style={{ fontSize: '10px', color: 'var(--text-tertiary)' }}>Last: {formatDt(s.last_run_at)}</span>}
                                                                 </div>
-                                                                <div style={{ display: 'flex', gap: '4px', marginTop: '6px' }}>
-                                                                    <button className="btn btn-ghost" title="Trigger" style={{ fontSize: '11px', padding: '2px 5px' }}
+                                                                <div style={{ display: 'flex', gap: '4px', alignItems: 'center' }}>
+                                                                    <button className="btn btn-ghost" title={t('agent.tasks.triggerNow', 'Trigger Now')} style={{ fontSize: '12px', padding: '2px 6px', lineHeight: 1 }}
                                                                         onClick={() => triggerScheduleMut.mutate(s.id)}>▶️</button>
-                                                                    <button className={`btn ${s.is_enabled ? 'btn-secondary' : 'btn-primary'}`}
-                                                                        style={{ fontSize: '10px', padding: '2px 6px' }}
-                                                                        onClick={() => toggleScheduleMut.mutate({ sid: s.id, enabled: !s.is_enabled })}>
-                                                                        {s.is_enabled ? 'Pause' : 'Resume'}
-                                                                    </button>
-                                                                    <button className="btn btn-ghost" style={{ fontSize: '10px', padding: '2px 5px', color: 'var(--danger)' }}
-                                                                        onClick={() => { if (confirm(`Delete ${s.name}?`)) deleteScheduleMut.mutate(s.id); }}>{t('common.delete')}</button>
+                                                                    <button className="btn btn-ghost" title={s.is_enabled ? t('common.pause', 'Pause') : t('common.resume', 'Resume')} style={{ fontSize: '12px', padding: '2px 6px', lineHeight: 1 }}
+                                                                        onClick={() => toggleScheduleMut.mutate({ sid: s.id, enabled: !s.is_enabled })}>{s.is_enabled ? '⏸️' : '▶️'}</button>
+                                                                    <button className="btn btn-ghost" title={t('common.delete')} style={{ fontSize: '12px', padding: '2px 6px', lineHeight: 1, color: 'var(--error)' }}
+                                                                        onClick={() => { if (confirm(`Delete ${s.name}?`)) deleteScheduleMut.mutate(s.id); }}>🗑️</button>
                                                                 </div>
                                                             </div>
                                                         );
@@ -1617,13 +1622,17 @@ export default function AgentDetail() {
 
 
                                         {col !== 'pending' && colTasks.map(task => (
-                                            <div key={task.id} className="card" style={{ marginBottom: '6px', padding: '10px', cursor: 'pointer', border: selectedTaskId === task.id ? '1px solid var(--accent)' : '1px solid transparent' }} onClick={() => setSelectedTaskId(selectedTaskId === task.id ? null : task.id)}>
-                                                <div style={{ fontSize: '12px', fontWeight: 500 }}>{task.title}</div>
-                                                <div style={{ display: 'flex', gap: '4px', marginTop: '6px' }}>
+                                            <div key={task.id} className="card" style={{ marginBottom: '6px', padding: '10px 12px', cursor: 'pointer', border: selectedTaskId === task.id ? '1px solid var(--accent-primary)' : '1px solid transparent', opacity: task.status === 'paused' ? 0.6 : 1 }} onClick={() => setSelectedTaskId(selectedTaskId === task.id ? null : task.id)}>
+                                                <div style={{ display: 'flex', alignItems: 'center', gap: '6px', marginBottom: '2px' }}>
+                                                    <span style={{ fontSize: '12px', fontWeight: 500, flex: 1 }}>{task.title}</span>
+                                                    {task.creator_username && <span style={{ fontSize: '10px', color: 'var(--text-tertiary)', background: 'var(--bg-tertiary)', borderRadius: '4px', padding: '1px 5px' }}>@{task.creator_username}</span>}
+                                                </div>
+                                                <div style={{ display: 'flex', gap: '4px', marginTop: '4px', flexWrap: 'wrap', alignItems: 'center' }}>
                                                     <span className={`badge badge-${task.priority === 'high' || task.priority === 'urgent' ? 'error' : 'info'}`} style={{ fontSize: '10px' }}>
                                                         {task.priority}
                                                     </span>
                                                     {task.status === 'doing' && <span className="badge" style={{ fontSize: '10px', background: 'var(--warning)' }}>In progress</span>}
+                                                    {task.status === 'paused' && <span className="badge" style={{ fontSize: '10px', background: 'var(--text-tertiary)' }}>⏸️ Paused</span>}
                                                     {task.type === 'supervision' && task.supervision_target_name && (
                                                         <span className="badge" style={{ fontSize: '10px', background: '#e8b4f8' }}>→ {task.supervision_target_name}</span>
                                                     )}
@@ -1640,12 +1649,30 @@ export default function AgentDetail() {
                                                         }
                                                     })()}
                                                 </div>
+                                                {/* Supervision action buttons */}
+                                                {task.type === 'supervision' && task.status !== 'done' && (
+                                                    <div style={{ display: 'flex', gap: '4px', marginTop: '6px' }} onClick={e => e.stopPropagation()}>
+                                                        <button className="btn btn-ghost" title={t('agent.tasks.triggerNow', 'Trigger Now')} style={{ fontSize: '12px', padding: '2px 6px', lineHeight: 1 }}
+                                                            onClick={async () => {
+                                                                const token = localStorage.getItem('token');
+                                                                await fetch(`/api/agents/${id}/tasks/${task.id}/trigger`, { method: 'POST', headers: { Authorization: `Bearer ${token}` } });
+                                                                queryClient.invalidateQueries({ queryKey: ['tasks', id] });
+                                                            }}>▶️</button>
+                                                        <button className="btn btn-ghost" title={task.status === 'paused' ? t('common.resume', 'Resume') : t('common.pause', 'Pause')} style={{ fontSize: '12px', padding: '2px 6px', lineHeight: 1 }}
+                                                            onClick={async () => {
+                                                                const token = localStorage.getItem('token');
+                                                                await fetch(`/api/agents/${id}/tasks/${task.id}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` }, body: JSON.stringify({ status: task.status === 'paused' ? 'pending' : 'paused' }) });
+                                                                queryClient.invalidateQueries({ queryKey: ['tasks', id] });
+                                                            }}>{task.status === 'paused' ? '▶️' : '⏸️'}</button>
+                                                    </div>
+                                                )}
                                                 {selectedTaskId === task.id && taskLogs.length > 0 && (
                                                     <div style={{ marginTop: '8px', borderTop: '1px solid var(--border-subtle)', paddingTop: '8px' }}>
+                                                        <div style={{ fontSize: '10px', fontWeight: 600, color: 'var(--text-tertiary)', marginBottom: '6px' }}>Execution History</div>
                                                         {taskLogs.map(log => (
                                                             <div key={log.id} style={{ fontSize: '11px', color: 'var(--text-secondary)', marginBottom: '6px', whiteSpace: 'pre-wrap', lineHeight: 1.5 }}>
                                                                 <div style={{ fontSize: '10px', color: 'var(--text-tertiary)', marginBottom: '2px' }}>
-                                                                    {new Date(log.created_at).toLocaleTimeString('zh-CN')}
+                                                                    {new Date(log.created_at).toLocaleString('zh-CN', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}
                                                                 </div>
                                                                 {log.content}
                                                             </div>
@@ -1653,7 +1680,7 @@ export default function AgentDetail() {
                                                     </div>
                                                 )}
                                                 {selectedTaskId === task.id && taskLogs.length === 0 && (
-                                                    <div style={{ marginTop: '8px', fontSize: '11px', color: 'var(--text-tertiary)' }}>No logs</div>
+                                                    <div style={{ marginTop: '8px', fontSize: '11px', color: 'var(--text-tertiary)' }}>No execution history</div>
                                                 )}
                                             </div>
                                         ))}

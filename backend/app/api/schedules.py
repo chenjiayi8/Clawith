@@ -42,6 +42,8 @@ class ScheduleOut(BaseModel):
     last_run_at: datetime | None = None
     next_run_at: datetime | None = None
     run_count: int
+    created_by: uuid.UUID | None = None
+    creator_username: str | None = None
     created_at: datetime | None = None
 
     model_config = {"from_attributes": True}
@@ -60,7 +62,19 @@ async def list_schedules(
         .where(AgentSchedule.agent_id == agent_id)
         .order_by(AgentSchedule.created_at.desc())
     )
-    return [ScheduleOut.model_validate(s) for s in result.scalars().all()]
+    schedules = result.scalars().all()
+    # Batch-load creator usernames
+    creator_ids = {s.created_by for s in schedules if s.created_by}
+    creator_map = {}
+    if creator_ids:
+        users_result = await db.execute(select(User).where(User.id.in_(creator_ids)))
+        creator_map = {u.id: u.username for u in users_result.scalars().all()}
+    out_list = []
+    for s in schedules:
+        s_out = ScheduleOut.model_validate(s)
+        s_out.creator_username = creator_map.get(s.created_by)
+        out_list.append(s_out)
+    return out_list
 
 
 @router.post("/", response_model=ScheduleOut, status_code=status.HTTP_201_CREATED)
@@ -182,3 +196,38 @@ async def trigger_schedule(
     await db.flush()
 
     return {"status": "triggered", "schedule_id": str(schedule_id)}
+
+
+@router.get("/{schedule_id}/history")
+async def get_schedule_history(
+    agent_id: uuid.UUID,
+    schedule_id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Get execution history for a schedule from audit logs."""
+    await check_agent_access(db, current_user, agent_id)
+    from app.models.audit import AuditLog
+    result = await db.execute(
+        select(AuditLog)
+        .where(
+            AuditLog.agent_id == agent_id,
+            AuditLog.action.in_(["schedule_fire", "schedule_run"]),
+        )
+        .order_by(AuditLog.created_at.desc())
+    )
+    logs = result.scalars().all()
+    # Filter by schedule_id in details JSON
+    history = []
+    for log in logs:
+        detail = log.details or {}
+        if detail.get("schedule_id") == str(schedule_id):
+            history.append({
+                "id": str(log.id),
+                "action": log.action,
+                "created_at": log.created_at.isoformat() if log.created_at else None,
+                "detail": detail,
+            })
+        if len(history) >= 20:
+            break
+    return history

@@ -45,10 +45,11 @@ export interface Task {
     title: string;
     description?: string;
     type: 'todo' | 'supervision';
-    status: 'pending' | 'doing' | 'done';
+    status: 'pending' | 'doing' | 'done' | 'paused';
     priority: 'low' | 'medium' | 'high' | 'urgent';
     assignee: string;
     created_by: string;
+    creator_username?: string;
     due_date?: string;
     supervision_target_name?: string;
     supervision_channel?: string;

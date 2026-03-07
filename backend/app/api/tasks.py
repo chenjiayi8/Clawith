@@ -16,6 +16,17 @@ from app.schemas.schemas import TaskCreate, TaskLogCreate, TaskLogOut, TaskOut, 
 router = APIRouter(prefix="/agents/{agent_id}/tasks", tags=["tasks"])
 
 
+async def _enrich_task_out(task: Task, db: AsyncSession) -> TaskOut:
+    """Convert Task to TaskOut with creator_username populated."""
+    out = TaskOut.model_validate(task)
+    if task.created_by:
+        user_result = await db.execute(select(User).where(User.id == task.created_by))
+        user = user_result.scalar_one_or_none()
+        if user:
+            out.creator_username = user.username
+    return out
+
+
 @router.get("/", response_model=list[TaskOut])
 async def list_tasks(
     agent_id: uuid.UUID,
@@ -33,7 +44,19 @@ async def list_tasks(
         query = query.where(Task.type == type_filter)
     query = query.order_by(Task.created_at.desc())
     result = await db.execute(query)
-    return [TaskOut.model_validate(t) for t in result.scalars().all()]
+    tasks_list = result.scalars().all()
+    # Batch-load creator usernames
+    creator_ids = {t.created_by for t in tasks_list if t.created_by}
+    creator_map = {}
+    if creator_ids:
+        users_result = await db.execute(select(User).where(User.id.in_(creator_ids)))
+        creator_map = {u.id: u.username for u in users_result.scalars().all()}
+    out_list = []
+    for t in tasks_list:
+        t_out = TaskOut.model_validate(t)
+        t_out.creator_username = creator_map.get(t.created_by)
+        out_list.append(t_out)
+    return out_list
 
 
 @router.post("/", response_model=TaskOut, status_code=status.HTTP_201_CREATED)
@@ -60,7 +83,7 @@ async def create_task(
     db.add(task)
     await db.flush()
 
-    task_out = TaskOut.model_validate(task)
+    task_out = await _enrich_task_out(task, db)
 
     # Commit so the background executor can see the task in its own session
     await db.commit()
@@ -92,7 +115,7 @@ async def update_task(
     for field, value in data.model_dump(exclude_unset=True).items():
         setattr(task, field, value)
     await db.flush()
-    return TaskOut.model_validate(task)
+    return await _enrich_task_out(task, db)
 
 
 @router.get("/{task_id}/logs", response_model=list[TaskLogOut])
@@ -124,3 +147,28 @@ async def add_task_log(
     db.add(log)
     await db.flush()
     return TaskLogOut.model_validate(log)
+
+
+@router.post("/{task_id}/trigger")
+async def trigger_task(
+    agent_id: uuid.UUID,
+    task_id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Manually trigger a supervision task execution (for testing)."""
+    from app.core.permissions import is_agent_expired
+    agent, _access = await check_agent_access(db, current_user, agent_id)
+    if is_agent_expired(agent):
+        raise HTTPException(status_code=403, detail="Agent has expired")
+
+    result = await db.execute(select(Task).where(Task.id == task_id, Task.agent_id == agent_id))
+    task = result.scalar_one_or_none()
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+
+    import asyncio
+    from app.services.task_executor import execute_task
+    asyncio.create_task(execute_task(task.id, agent_id))
+
+    return {"status": "triggered", "task_id": str(task_id)}
