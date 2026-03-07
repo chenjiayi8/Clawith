@@ -120,13 +120,25 @@ async def execute_task(task_id: uuid.UUID, agent_id: uuid.UUID) -> None:
             return
 
         data = json.loads(stdout_text)
+        if not isinstance(data, dict):
+            await _log_error(task_id, f"LLM 返回非预期格式: {stdout_text[:300]}")
+            if task_type == 'supervision':
+                await _restore_supervision_status(task_id)
+            return
         if "error" in data:
             await _log_error(task_id, f"LLM 错误: {data['error'].get('message', str(data['error']))[:200]}")
             if task_type == 'supervision':
                 await _restore_supervision_status(task_id)
             return
 
-        reply = data["choices"][0]["message"]["content"]
+        choices = data.get("choices")
+        if not choices or not isinstance(choices, list):
+            await _log_error(task_id, f"LLM 响应格式异常: {stdout_text[:300]}")
+            if task_type == 'supervision':
+                await _restore_supervision_status(task_id)
+            return
+
+        reply = choices[0].get("message", {}).get("content", "")
         print(f"[TaskExec] LLM reply: {reply[:80]}")
     except Exception as e:
         error_msg = str(e) or repr(e)
