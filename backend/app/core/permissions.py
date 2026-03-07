@@ -1,6 +1,7 @@
 """RBAC permission checking utilities."""
 
 import uuid
+from datetime import datetime, timezone
 from typing import Tuple
 
 from fastapi import HTTPException, status
@@ -53,3 +54,13 @@ async def check_agent_access(db: AsyncSession, user: User, agent_id: uuid.UUID) 
 def is_agent_creator(user: User, agent: Agent) -> bool:
     """Check if the user is the creator (admin) of the agent."""
     return agent.creator_id == user.id or user.role == "platform_admin"
+
+
+def is_agent_expired(agent: Agent) -> bool:
+    """Return True if the agent is manually marked expired or its expires_at is in the past."""
+    if getattr(agent, 'is_expired', False):
+        return True
+    expires_at = getattr(agent, 'expires_at', None)
+    if expires_at and datetime.now(timezone.utc) > expires_at:
+        return True
+    return False

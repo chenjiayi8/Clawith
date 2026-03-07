@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.permissions import check_agent_access, is_agent_creator
+from app.core.permissions import check_agent_access, is_agent_creator, is_agent_expired
 from app.core.security import get_current_user
 from app.database import get_db
 from app.models.channel_config import ChannelConfig
@@ -411,6 +411,9 @@ async def _call_agent_llm(db: AsyncSession, agent_id: uuid.UUID, user_text: str,
     agent = agent_result.scalar_one_or_none()
     if not agent:
         return "⚠️ 数字员工未找到"
+
+    if is_agent_expired(agent):
+        return "This Agent has expired and is off duty. Please contact your admin to extend its service."
 
     if not agent.primary_model_id:
         return f"⚠️ {agent.name} 未配置 LLM 模型，请在管理后台设置。"
