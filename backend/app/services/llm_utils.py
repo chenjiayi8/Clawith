@@ -13,12 +13,13 @@ PROVIDER_URLS: dict[str, str | None] = {
     "deepseek": "https://api.deepseek.com/v1",
     "qwen": "https://dashscope.aliyuncs.com/compatible-mode/v1",
     "zhipu": "https://open.bigmodel.cn/api/paas/v4",
+    "minimax": "https://api.minimaxi.com/v1",
     "openrouter": "https://openrouter.ai/api/v1",
     "custom": None,
 }
 
 # Providers that support OpenAI-compatible tool_choice and parallel_tool_calls
-_TOOL_CHOICE_PROVIDERS = {"openai", "qwen", "deepseek", "zhipu", "openrouter", "custom"}
+_TOOL_CHOICE_PROVIDERS = {"openai", "qwen", "deepseek", "zhipu", "minimax", "openrouter", "custom"}
 
 
 def get_provider_base_url(provider: str, custom_base_url: str | None = None) -> str | None:
@@ -51,6 +52,7 @@ def get_tool_params(provider: str) -> dict:
 _MAX_TOKENS_BY_PROVIDER: dict[str, int] = {
     "qwen": 8192,       # conservative default; qwen-max hard limit
     "anthropic": 4096,  # claude native max output
+    "minimax": 16384,   # MiniMax-M2.5 supports large output
 }
 # Model-level overrides (model string prefix → limit)
 _MAX_TOKENS_BY_MODEL: dict[str, int] = {

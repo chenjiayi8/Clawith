@@ -654,6 +654,7 @@ export default function EnterpriseSettings() {
                                             <option value="anthropic">Anthropic</option>
                                             <option value="openai">OpenAI</option>
                                             <option value="deepseek">DeepSeek</option>
+                                            <option value="minimax">MiniMax</option>
                                             <option value="qwen">Qwen (DashScope)</option>
                                             <option value="zhipu">Zhipu</option>
                                             <option value="openrouter">OpenRouter</option>
