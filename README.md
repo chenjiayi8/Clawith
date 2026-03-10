@@ -164,6 +164,9 @@ git pull
 docker compose up -d --build
 ```
 
+**Agent workspace data storage:**
+Agent workspace files (soul.md, memory, skills, workspace files) are stored in `./backend/agent_data/` on the host filesystem. Each agent has its own directory named by its UUID (e.g., `backend/agent_data/<agent-id>/`). This directory is mounted into the backend container at `/data/agents/`, making agent data directly accessible from your local filesystem.
+
 > **🇨🇳 Docker Registry Mirror (China users):** If `docker compose up -d` fails with a timeout, configure a Docker registry mirror first:
 > ```bash
 > sudo tee /etc/docker/daemon.json > /dev/null <<EOF
