@@ -216,21 +216,40 @@ async def feishu_event_webhook(
                 if _line_parts:
                     _text_parts.append("".join(_line_parts))
             _extracted_text = "\n".join(_text_parts).strip()
-            # Append image hint so the LLM knows images were sent
-            if not _extracted_text and _post_image_keys:
-                _extracted_text = "[用户发送了图片]"
-            elif _post_image_keys:
-                _extracted_text += f"\n[用户同时发送了 {len(_post_image_keys)} 张图片，已保存到工作空间]"
-            # Rewrite as text message so existing handler processes it
-            message["content"] = _json_post.dumps({"text": _extracted_text})
-            msg_type = "text"
-            print(f"[Feishu] Normalized post → text='{_extracted_text[:100]}', images={len(_post_image_keys)}")
-            # Download post images to workspace in background
+            # Download images and embed as base64 for vision-capable models
+            _image_markers = []
             if _post_image_keys:
-                import asyncio as _asyncio_post
-                _asyncio_post.create_task(_download_post_images(
-                    agent_id, config, message.get("message_id", ""), _post_image_keys
-                ))
+                import base64 as _b64
+                _msg_id = message.get("message_id", "")
+                from pathlib import Path as _PostPath
+                from app.config import get_settings as _post_gs
+                _post_settings = _post_gs()
+                _upload_dir = _PostPath(_post_settings.AGENT_DATA_DIR) / str(agent_id) / "workspace" / "uploads"
+                _upload_dir.mkdir(parents=True, exist_ok=True)
+                for _ik in _post_image_keys:
+                    try:
+                        _img_bytes = await feishu_service.download_message_resource(
+                            config.app_id, config.app_secret, _msg_id, _ik, "image"
+                        )
+                        # Save to workspace
+                        _save_path = _upload_dir / f"image_{_ik[-8:]}.jpg"
+                        _save_path.write_bytes(_img_bytes)
+                        print(f"[Feishu] Saved post image to {_save_path} ({len(_img_bytes)} bytes)")
+                        # Embed as base64 marker for vision models
+                        _b64_data = _b64.b64encode(_img_bytes).decode("ascii")
+                        _image_markers.append(f"[image_data:data:image/jpeg;base64,{_b64_data}]")
+                    except Exception as _dl_err:
+                        print(f"[Feishu] Failed to download post image {_ik}: {_dl_err}")
+            # Build final text with embedded images
+            if not _extracted_text and _image_markers:
+                _extracted_text = "[用户发送了图片，请看图片内容]"
+            _final_content = _extracted_text
+            if _image_markers:
+                _final_content += "\n" + "\n".join(_image_markers)
+            # Rewrite as text message so existing handler processes it
+            message["content"] = _json_post.dumps({"text": _final_content})
+            msg_type = "text"
+            print(f"[Feishu] Normalized post → text='{_extracted_text[:100]}', images={len(_image_markers)}")
 
         if msg_type in ("file", "image"):
             import asyncio as _asyncio
@@ -694,6 +713,7 @@ async def _call_agent_llm(db: AsyncSession, agent_id: uuid.UUID, user_text: str,
             agent.role_description or "",
             agent_id=agent_id,
             user_id=effective_user_id,
+            supports_vision=getattr(model, 'supports_vision', False),
         )
         return reply
     except Exception as e:
