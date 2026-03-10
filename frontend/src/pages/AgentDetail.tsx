@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, Component, ErrorInfo } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useTranslation } from 'react-i18next';
@@ -485,7 +485,7 @@ function RelationshipEditor({ agentId, readOnly = false }: { agentId: string; re
     );
 }
 
-export default function AgentDetail() {
+function AgentDetailInner() {
     const { t, i18n } = useTranslation();
     const { id } = useParams<{ id: string }>();
     const navigate = useNavigate();
@@ -1084,8 +1084,9 @@ export default function AgentDetail() {
 
     const { data: metrics } = useQuery({
         queryKey: ['metrics', id],
-        queryFn: () => agentApi.metrics(id!),
+        queryFn: () => agentApi.metrics(id!).catch(() => null),
         enabled: !!id && activeTab === 'status',
+        retry: false,
     });
 
     const { data: channelConfig } = useQuery({
@@ -3795,5 +3796,48 @@ export default function AgentDetail() {
             }
 
         </>
+    );
+}
+
+// Error boundary to catch unhandled React errors and prevent white screen
+class AgentDetailErrorBoundary extends Component<{ children: React.ReactNode }, { hasError: boolean; error: Error | null }> {
+    constructor(props: { children: React.ReactNode }) {
+        super(props);
+        this.state = { hasError: false, error: null };
+    }
+    static getDerivedStateFromError(error: Error) {
+        return { hasError: true, error };
+    }
+    componentDidCatch(error: Error, errorInfo: ErrorInfo) {
+        console.error('AgentDetail crash caught by error boundary:', error, errorInfo);
+    }
+    render() {
+        if (this.state.hasError) {
+            return (
+                <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', height: '60vh', gap: '16px' }}>
+                    <div style={{ fontSize: '20px', fontWeight: 600, color: 'var(--text-primary)' }}>Something went wrong</div>
+                    <div style={{ fontSize: '13px', color: 'var(--text-tertiary)', maxWidth: '400px', textAlign: 'center' }}>
+                        {this.state.error?.message || 'An unexpected error occurred while loading this page.'}
+                    </div>
+                    <button
+                        className="btn btn-primary"
+                        onClick={() => { this.setState({ hasError: false, error: null }); window.location.reload(); }}
+                        style={{ marginTop: '8px' }}
+                    >
+                        Reload Page
+                    </button>
+                </div>
+            );
+        }
+        return this.props.children;
+    }
+}
+
+// Wrap the AgentDetail component with error boundary
+export default function AgentDetailWithErrorBoundary() {
+    return (
+        <AgentDetailErrorBoundary>
+            <AgentDetailInner />
+        </AgentDetailErrorBoundary>
     );
 }
