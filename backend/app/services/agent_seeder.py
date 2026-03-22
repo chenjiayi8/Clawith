@@ -190,8 +190,14 @@ async def seed_default_agents():
 
     Idempotency is guarded by a '.seeded' marker file in AGENT_DATA_DIR rather
     than by agent name, so the seeder does NOT re-run if the user renames or
-    deletes the default agents.  Delete the marker manually to re-seed.
+    deletes the default agents. Delete the marker manually to re-seed.
     """
+    import os
+
+    if os.environ.get("SKIP_DEFAULT_AGENTS", "").lower() in ("true", "1", "yes"):
+        logger.info("[AgentSeeder] SKIP_DEFAULT_AGENTS is set, skipping default agents")
+        return
+
     # --- Idempotency guard: file-based marker (survives agent renames/deletes) ---
     seed_marker = Path(settings.AGENT_DATA_DIR) / ".seeded"
     if seed_marker.exists():

@@ -11,6 +11,15 @@ if [ "$(id -u)" = '0' ]; then
     echo "[entrypoint] Detected root user, fixing permissions..."
     chown -R clawith:clawith ${AGENT_DATA_DIR}
 
+    # Add clawith to the docker-socket group when the socket is mounted so
+    # workspace container-management commands can talk to Docker.
+    DOCKER_SOCK_GID=$(stat -c '%g' /var/run/docker.sock 2>/dev/null || true)
+    if [ -n "$DOCKER_SOCK_GID" ] && [ "$DOCKER_SOCK_GID" != "0" ]; then
+        echo "[entrypoint] Adding clawith to docker socket group (GID=$DOCKER_SOCK_GID)..."
+        groupadd -g "$DOCKER_SOCK_GID" -o docker 2>/dev/null || true
+        usermod -aG docker clawith 2>/dev/null || true
+    fi
+
     echo "[entrypoint] Dropping privileges to 'clawith' and re-executing..."
     exec gosu clawith /bin/bash "$0" "$@"
 fi
