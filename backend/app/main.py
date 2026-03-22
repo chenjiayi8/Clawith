@@ -128,6 +128,7 @@ async def lifespan(app: FastAPI):
     from app.services.wecom_stream import wecom_stream_manager
     from app.services.wechat_channel import wechat_poll_manager
     from app.services.discord_gateway import discord_gateway_manager
+    from app.services.workspace_health import run_health_checks
 
     # ── Step 0: Ensure all DB tables exist (idempotent, safe to run on every startup) ──
     try:
@@ -158,8 +159,8 @@ async def lifespan(app: FastAPI):
         import app.models.agent_credential  # noqa
         import app.models.okr            # noqa  OKR system tables
         import app.models.onboarding     # noqa
-
         import app.models.identity       # noqa
+        import app.models.workspace      # noqa: F401
         async with engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
         logger.info("[startup] Database tables ready")
@@ -280,6 +281,7 @@ async def lifespan(app: FastAPI):
             ("wecom_stream", wecom_stream_manager.start_all()),
             ("wechat_poll", wechat_poll_manager.start_all()),
             ("discord_gw", discord_gateway_manager.start_all()),
+            ("workspace_health", run_health_checks()),
         ]:
             task = asyncio.create_task(coro, name=name)
             task.add_done_callback(_bg_task_error)
@@ -360,10 +362,14 @@ from app.api.notification import router as notification_router
 from app.api.gateway import router as gateway_router
 from app.api.admin import router as admin_router
 from app.api.pages import router as pages_router, public_router as pages_public_router
+<<<<<<< HEAD
 from app.api.agent_credentials import router as credentials_router
 from app.api.agentbay_control import router as agentbay_control_router
 from app.api.okr import router as okr_router
 from app.api.onboarding import router as onboarding_router
+=======
+from app.api.workspace import public_router as workspace_public_router, router as workspace_router
+>>>>>>> 03f7086 (feat(workspace): wire models, routes, and health checks into app startup)
 
 app.include_router(auth_router, prefix=settings.API_PREFIX)
 app.include_router(agents_router, prefix=settings.API_PREFIX)
@@ -406,10 +412,15 @@ app.include_router(gateway_router, prefix=settings.API_PREFIX)
 app.include_router(admin_router, prefix=settings.API_PREFIX)
 app.include_router(pages_router, prefix=settings.API_PREFIX)
 app.include_router(pages_public_router)  # Public endpoint for /p/{short_id}, no API prefix
+<<<<<<< HEAD
 app.include_router(credentials_router, prefix=settings.API_PREFIX)
 app.include_router(agentbay_control_router, prefix=settings.API_PREFIX)
 app.include_router(okr_router)  # OKR — self-prefixed at /api/okr
 app.include_router(onboarding_router, prefix=settings.API_PREFIX)
+=======
+app.include_router(workspace_public_router)  # Public endpoint, no API prefix
+app.include_router(workspace_router, prefix=settings.API_PREFIX)
+>>>>>>> 03f7086 (feat(workspace): wire models, routes, and health checks into app startup)
 
 
 @app.get("/api/health", response_model=HealthResponse, tags=["health"])
