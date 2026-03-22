@@ -29,3 +29,12 @@ _agents/
 
 # Internal docs
 docs/
+
+# Runtime data (postgres, redis, agent workspaces)
+data/
+
+# Infrastructure config (not code)
+cloudfront-config.json
+
+# Unnecessary extra requirements file (deps in pyproject.toml)
+backend/requirements.txt
