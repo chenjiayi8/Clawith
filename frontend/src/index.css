@@ -1669,6 +1669,21 @@ select:focus {
   letter-spacing: -0.02em;
 }
 
+/* Dashboard responsive classes — desktop baselines */
+.stats-grid {
+  grid-template-columns: repeat(4, 1fr);
+}
+
+.agent-row-header,
+.agent-row {
+  grid-template-columns: 220px 1fr 150px 100px;
+}
+
+.activity-feed-item {
+  padding: 7px 12px;
+  font-size: 13px;
+}
+
 @media (max-width: 768px) {
   .mobile-menu-btn {
     display: flex;
@@ -1697,5 +1712,37 @@ select:focus {
 
   .page-header {
     padding-top: 8px;
+  }
+
+  .stats-grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+
+  .agent-row-header {
+    display: none;
+  }
+
+  .agent-row {
+    grid-template-columns: 1fr;
+    gap: 4px;
+    padding: 12px 16px;
+    border-bottom: 1px solid var(--border-subtle);
+  }
+
+  .agent-row .agent-row-activity {
+    display: none;
+  }
+
+  .agent-row .agent-row-meta {
+    display: flex;
+    gap: 12px;
+    align-items: center;
+    font-size: 12px;
+    color: var(--text-tertiary);
+  }
+
+  .activity-feed-item {
+    padding: 5px 8px;
+    font-size: 12px;
   }
 }
