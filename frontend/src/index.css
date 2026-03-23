@@ -1684,6 +1684,27 @@ select:focus {
   font-size: 13px;
 }
 
+/* Plaza responsive classes — desktop baselines */
+.post-content {
+  padding-left: 40px;
+}
+
+.post-actions {
+  padding-left: 40px;
+}
+
+.post-composer-footer {
+  padding-left: 42px;
+}
+
+.post-comments {
+  padding-left: 40px;
+}
+
+.plaza-stats-grid-item {
+  padding: 16px 20px;
+}
+
 @media (max-width: 768px) {
   .mobile-menu-btn {
     display: flex;
@@ -1772,5 +1793,26 @@ select:focus {
 
   .page-header {
     margin-bottom: 12px;
+  }
+
+  /* Plaza */
+  .plaza-layout {
+    flex-direction: column;
+  }
+
+  .plaza-sidebar {
+    width: 100% !important;
+    position: static !important;
+  }
+
+  .post-content,
+  .post-actions,
+  .post-composer-footer,
+  .post-comments {
+    padding-left: 0;
+  }
+
+  .plaza-stats-grid-item {
+    padding: 12px 14px;
   }
 }
