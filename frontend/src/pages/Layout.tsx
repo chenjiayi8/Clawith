@@ -634,6 +634,20 @@ export default function Layout() {
     };
 
     // Use user's own tenant_id directly (no switching)
+    const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
+
+    useEffect(() => {
+        const mq = window.matchMedia('(max-width: 768px)');
+        const handler = (e: MediaQueryListEvent | MediaQueryList) => {
+            if (!e.matches) setIsMobileMenuOpen(false);
+        };
+        handler(mq);
+        mq.addEventListener('change', handler);
+        return () => mq.removeEventListener('change', handler);
+    }, []);
+
+    const closeMobileMenu = () => setIsMobileMenuOpen(false);
+
     const currentTenant = user?.tenant_id || '';
     const currentTenantName = useMemo(() => {
         const tenant = (myTenants as any[]).find((item: any) => item.tenant_id === currentTenant);
@@ -930,7 +944,7 @@ export default function Layout() {
                     to={`/agents/${agent.id}/chat`}
                     className={({ isActive }) => `sidebar-item ${isActive || activeAgentId === agent.id ? 'active' : ''}`}
                     title={agent.name}
-                    onClick={() => setAgentDrawerOpen(false)}
+                    onClick={() => { setAgentDrawerOpen(false); closeMobileMenu(); }}
                 >
                     <span className="sidebar-item-icon" style={{ position: 'relative' }}>
                         <span className={`agent-avatar${agent.agent_type === 'openclaw' ? ' openclaw' : ''}`}>{avatarChar}</span>
@@ -1013,7 +1027,22 @@ export default function Layout() {
 
     return (
         <div className={`app-layout ${isSidebarCollapsed ? 'sidebar-collapsed' : ''}`}>
-            <nav className={`sidebar ${isSidebarCollapsed ? 'collapsed' : ''}`}>
+            <button
+                className="mobile-menu-btn"
+                onClick={() => setIsMobileMenuOpen(v => !v)}
+                aria-label="Menu"
+            >
+                <svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round">
+                    <path d="M3 5h14M3 10h14M3 15h14" />
+                </svg>
+            </button>
+
+            <div
+                className={`sidebar-backdrop${isMobileMenuOpen ? ' visible' : ''}`}
+                onClick={() => setIsMobileMenuOpen(false)}
+            />
+
+            <nav className={`sidebar ${isSidebarCollapsed ? 'collapsed' : ''}${isMobileMenuOpen ? ' mobile-open' : ''}`}>
                 <div className="sidebar-top">
                     <div className="sidebar-workspace-row" ref={tenantSwitcherRef} data-tour-target="company-switcher">
                         <button
@@ -1045,17 +1074,17 @@ export default function Layout() {
 
 
                     <div className="sidebar-section" data-tour-target="main-nav">
-                        <NavLink to="/plaza" className={({ isActive }) => `sidebar-item ${isActive ? 'active' : ''}`}>
+                        <NavLink to="/plaza" className={({ isActive }) => `sidebar-item ${isActive ? 'active' : ''}`} onClick={closeMobileMenu}>
                             <span className="sidebar-item-icon" style={{ display: 'flex', justifyContent: 'center', alignItems: 'center' }}>
                                 <IconBuildingMonument size={14} stroke={1.5} />
                             </span>
                             <span className="sidebar-item-text">{t('nav.plaza', 'Plaza')}</span>
                         </NavLink>
-                        <NavLink to="/dashboard" className={({ isActive }) => `sidebar-item ${isActive ? 'active' : ''}`}>
+                        <NavLink to="/dashboard" className={({ isActive }) => `sidebar-item ${isActive ? 'active' : ''}`} onClick={closeMobileMenu}>
                             <span className="sidebar-item-icon" style={{ display: 'flex' }}>{SidebarIcons.home}</span>
                             <span className="sidebar-item-text">{t('nav.dashboard')}</span>
                         </NavLink>
-                        <NavLink to="/okr" className={({ isActive }) => `sidebar-item ${isActive ? 'active' : ''}`}>
+                        <NavLink to="/okr" className={({ isActive }) => `sidebar-item ${isActive ? 'active' : ''}`} onClick={closeMobileMenu}>
                             <span className="sidebar-item-icon" style={{ display: 'flex', justifyContent: 'center', alignItems: 'center' }}>
                                 {/* OKR target icon */}
                                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
@@ -1169,7 +1198,7 @@ export default function Layout() {
                             {typeof document !== 'undefined' && langSubmenuContent && createPortal(langSubmenuContent, document.body)}
                             <div
                                 className="sidebar-account-row"
-                                onClick={() => setShowAccountMenu(v => !v)}
+                                onClick={() => { closeMobileMenu(); setShowAccountMenu(v => !v); }}
                             >
                                 <div style={{
                                     width: '28px', height: '28px', borderRadius: 'var(--radius-md)',

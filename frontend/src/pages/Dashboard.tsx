@@ -277,8 +277,8 @@ function StatsBar({ agents, allTasks, tokenUsage }: { agents: Agent[]; allTasks:
     ];
 
     return (
-        <div style={{
-            display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '1px',
+        <div className="stats-grid" style={{
+            display: 'grid', gap: '1px',
             background: 'var(--border-subtle)', borderRadius: 'var(--radius-lg)',
             overflow: 'hidden', marginBottom: '24px',
             border: '1px solid var(--border-subtle)',
@@ -325,9 +325,9 @@ function AgentRow({ agent, tasks, recentActivity }: {
     return (
         <div
             onClick={() => navigate(`/agents/${agent.id}`)}
+            className="agent-row"
             style={{
                 display: 'grid',
-                gridTemplateColumns: '220px 1fr 150px 100px',
                 alignItems: 'center', gap: '16px',
                 padding: '12px 16px',
                 borderRadius: 'var(--radius-md)',
@@ -375,7 +375,7 @@ function AgentRow({ agent, tasks, recentActivity }: {
             </div>
 
             {/* Latest Activity / Tasks */}
-            <div style={{ minWidth: 0 }}>
+            <div className="agent-row-activity" style={{ minWidth: 0 }}>
                 {latestActivity ? (
                     <div style={{
                         fontSize: '12px', color: 'var(--text-secondary)',
@@ -413,7 +413,7 @@ function AgentRow({ agent, tasks, recentActivity }: {
             </div>
 
             {/* Token Usage */}
-            <div>
+            <div className="agent-row-meta">
                 <div style={{ fontSize: '12px', color: 'var(--text-tertiary)', marginBottom: '3px' }}>
                     {formatTokens(usedTokens)}
                     {maxTokens > 0 && <span style={{ opacity: 0.6 }}> / {formatTokens(maxTokens)}</span>}
@@ -441,7 +441,7 @@ function AgentRow({ agent, tasks, recentActivity }: {
             </div>
 
             {/* Last Active */}
-            <div style={{ textAlign: 'right', fontSize: '12px', color: 'var(--text-tertiary)' }}>
+            <div className="agent-row-meta" style={{ textAlign: 'right', fontSize: '12px', color: 'var(--text-tertiary)' }}>
                 {timeAgo(agent.last_active_at, t)}
             </div>
         </div>
@@ -467,9 +467,9 @@ function ActivityFeed({ activities, agents }: { activities: any[]; agents: Agent
             {activities.map((act, i) => {
                 const agent = agentMap.get(act.agent_id);
                 return (
-                    <div key={act.id || i} style={{
-                        display: 'flex', gap: '12px', padding: '7px 12px',
-                        fontSize: '13px', alignItems: 'flex-start',
+                    <div key={act.id || i} className="activity-feed-item" style={{
+                        display: 'flex', gap: '12px',
+                        alignItems: 'flex-start',
                     }}>
                         <span style={{
                             color: 'var(--text-tertiary)', whiteSpace: 'nowrap',
@@ -625,9 +625,7 @@ export default function Dashboard() {
                         marginBottom: '32px',
                     }}>
                         {/* Agent List Header */}
-                        <div style={{
-                            display: 'grid',
-                            gridTemplateColumns: '220px 1fr 150px 100px',
+                        <div className="agent-row-header" style={{
                             padding: '10px 16px',
                             fontSize: '11px', color: 'var(--text-tertiary)', fontWeight: 500,
                             textTransform: 'uppercase' as const, letterSpacing: '0.05em',
