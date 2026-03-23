@@ -83,6 +83,9 @@ class Settings(BaseSettings):
     # CORS
     CORS_ORIGINS: list[str] = ["http://localhost:3000", "http://localhost:5173"]
 
+    # MCP Gateway
+    MCP_GATEWAY_URL: str = ""  # http://mcp-gateway:3000 — empty = no gateway
+
     # Jina AI (Reader + Search APIs)
     JINA_API_KEY: str = ""
 
