@@ -170,12 +170,6 @@ async def lifespan(app: FastAPI):
         logger.warning(f"[startup] Atlassian tools seed failed: {e}")
 
     try:
-        from app.services.mcp_gateway import sync_mcp_gateway_tools
-        await sync_mcp_gateway_tools()
-    except Exception as e:
-        logger.warning(f"[startup] MCP Gateway sync failed: {e}")
-
-    try:
         await seed_agent_templates()
     except Exception as e:
         logger.warning(f"[startup] Agent templates seed failed: {e}")
