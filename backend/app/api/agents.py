@@ -543,6 +543,10 @@ async def get_agent(
             effective_tz = tenant.timezone or "UTC"
     out["effective_timezone"] = effective_tz or "UTC"
 
+    # Skill map for autocomplete
+    from app.services.skill_map import get_skill_map
+    out["skill_map"] = get_skill_map(agent_id)
+
     return out
 
 
