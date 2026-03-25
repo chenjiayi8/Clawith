@@ -281,6 +281,8 @@ export default function Chat() {
     } | null>(null);
     const [streaming, setStreaming] = useState(false);
     const [isWaiting, setIsWaiting] = useState(false);
+    const [editingId, setEditingId] = useState<string | null>(null);
+    const [editContent, setEditContent] = useState('');
     const [attachedFile, setAttachedFile] = useState<{ name: string; text: string; path?: string; imageUrl?: string } | null>(null);
     const [liveState, setLiveState] = useState<LivePreviewState>({});
     const [livePanelVisible, setLivePanelVisible] = useState(false);
@@ -877,6 +879,7 @@ export default function Chat() {
 
     return (
         <div style={{ display: 'flex', flexDirection: 'column', height: '100%', overflow: 'hidden' }}>
+            <style>{`.message-row:hover .edit-btn { opacity: 1 !important; }`}</style>
             <div className="page-header">
                 <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
                     <div style={{ width: '36px', height: '36px', borderRadius: 'var(--radius-md)', background: 'var(--bg-tertiary)', border: '1px solid var(--border-subtle)', display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--text-tertiary)' }}>
@@ -942,7 +945,7 @@ export default function Chat() {
                                 )}
                             </div>
                         ) :
-                        <div key={i} className={`chat-message ${msg.role}`}>
+                        <div key={i} className={`chat-message ${msg.role} message-row`}>
                             <div className="chat-avatar" style={{ color: 'var(--text-tertiary)' }}>
                                 {msg.role === 'user' ? Icons.user : Icons.bot}
                             </div>
@@ -984,8 +987,52 @@ export default function Chat() {
                                     ) : (
                                         <MarkdownRenderer content={msg.content} />
                                     )
+                                ) : editingId === msg.id ? (
+                                    <div style={{ display: 'flex', gap: '8px', alignItems: 'flex-end', width: '100%' }}>
+                                        <textarea
+                                            value={editContent}
+                                            onChange={e => setEditContent(e.target.value)}
+                                            autoFocus
+                                            style={{ flex: 1, minHeight: '40px', resize: 'vertical', padding: '8px', borderRadius: '4px', border: '1px solid var(--border-color, #333)', background: 'var(--bg-secondary, #1e1e1e)', color: 'inherit' }}
+                                        />
+                                        <button onClick={() => {
+                                            wsRef.current?.send(JSON.stringify({
+                                                type: 'edit',
+                                                message_id: msg.id,
+                                                content: editContent,
+                                            }));
+                                            setEditingId(null);
+                                        }} style={{ padding: '4px 12px', borderRadius: '4px', background: 'var(--primary, #4a9eff)', color: 'white', border: 'none', cursor: 'pointer' }}>Save</button>
+                                        <button onClick={() => setEditingId(null)} style={{ padding: '4px 12px', borderRadius: '4px', background: 'transparent', border: '1px solid var(--border-color, #333)', cursor: 'pointer', color: 'inherit' }}>Cancel</button>
+                                    </div>
                                 ) : (
-                                    <MarkdownRenderer content={msg.content} />
+                                    <div style={{ display: 'flex', alignItems: 'flex-start', gap: '6px' }}>
+                                        <div style={{ flex: 1 }}>
+                                            <MarkdownRenderer content={msg.content} />
+                                        </div>
+                                        {msg.role === 'user' && !msg.isSkillIndicator && msg.id && (
+                                            <button
+                                                onClick={() => {
+                                                    setEditingId(msg.id || null);
+                                                    setEditContent(msg.content);
+                                                }}
+                                                title="Edit"
+                                                style={{
+                                                    opacity: 0,
+                                                    transition: 'opacity 0.2s',
+                                                    background: 'none',
+                                                    border: 'none',
+                                                    cursor: 'pointer',
+                                                    padding: '4px',
+                                                    fontSize: '14px',
+                                                    flexShrink: 0,
+                                                }}
+                                                className="edit-btn"
+                                            >
+                                                ✏️
+                                            </button>
+                                        )}
+                                    </div>
                                 )}
                                 {msg.timestamp && (
                                     <div style={{ fontSize: '10px', color: 'var(--text-tertiary)', marginTop: '4px', opacity: 0.7 }}>

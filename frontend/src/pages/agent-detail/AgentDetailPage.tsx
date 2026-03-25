@@ -2575,6 +2575,8 @@ export default function AgentDetailPage() {
     const [wsConnected, setWsConnected] = useState(false);
     const [isWaiting, setIsWaiting] = useState(false);
     const [isStreaming, setIsStreaming] = useState(false);
+    const [chatEditingId, setChatEditingId] = useState<string | null>(null);
+    const [chatEditContent, setChatEditContent] = useState('');
     const [chatUploadDrafts, setChatUploadDrafts] = useState<{ id: string; name: string; percent: number; previewUrl?: string; sizeBytes: number }[]>([]);
     const chatUploadAbortRef = useRef<Map<string, () => void>>(new Map());
     type AttachedFileRef = { name: string; text: string; path?: string; imageUrl?: string; source?: 'upload' | 'workspace_auto' };
@@ -3445,7 +3447,7 @@ export default function AgentDetailPage() {
         })() : null;
 
         return (
-            <div key={i} className={`chat-msg-row${isLeft ? '' : ' chat-msg-row--user'}`}>
+            <div key={i} className={`chat-msg-row message-row${isLeft ? '' : ' chat-msg-row--user'}`}>
                 <div
                     className={`chat-msg-avatar${isLeft ? '' : ' chat-msg-avatar--user'}`}
                     style={hideAvatar ? { visibility: 'hidden' } : undefined}
@@ -3486,14 +3488,60 @@ export default function AgentDetailPage() {
                                         <span style={{ color: 'var(--text-tertiary)', fontSize: '13px' }}>{t('agent.chat.thinking', 'Thinking...')}</span>
                                     </div>
                                 ) : <MarkdownRenderer content={displayContent} />
-                            ) : <MarkdownRenderer content={displayContent} />}
+                            ) : chatEditingId === msg.id ? (
+                                <div style={{ display: 'flex', gap: '8px', alignItems: 'flex-end', width: '100%' }}>
+                                    <textarea
+                                        value={chatEditContent}
+                                        onChange={e => setChatEditContent(e.target.value)}
+                                        autoFocus
+                                        style={{ flex: 1, minHeight: '40px', resize: 'vertical', padding: '8px', borderRadius: '4px', border: '1px solid var(--border-color, #333)', background: 'var(--bg-secondary, #1e1e1e)', color: 'inherit' }}
+                                    />
+                                    <button onClick={() => {
+                                        wsRef.current?.send(JSON.stringify({
+                                            type: 'edit',
+                                            message_id: msg.id,
+                                            content: chatEditContent,
+                                        }));
+                                        setChatEditingId(null);
+                                    }} style={{ padding: '4px 12px', borderRadius: '4px', background: 'var(--primary, #4a9eff)', color: 'white', border: 'none', cursor: 'pointer' }}>Save</button>
+                                    <button onClick={() => setChatEditingId(null)} style={{ padding: '4px 12px', borderRadius: '4px', background: 'transparent', border: '1px solid var(--border-color, #333)', cursor: 'pointer', color: 'inherit' }}>Cancel</button>
+                                </div>
+                            ) : (
+                                <div style={{ display: 'flex', alignItems: 'flex-start', gap: '6px' }}>
+                                    <div style={{ flex: 1 }}>
+                                        <MarkdownRenderer content={displayContent} />
+                                    </div>
+                                    {msg.role === 'user' && !msg.isSkillIndicator && msg.id && (
+                                        <button
+                                            onClick={() => {
+                                                setChatEditingId(msg.id || null);
+                                                setChatEditContent(displayContent);
+                                            }}
+                                            title="Edit"
+                                            style={{
+                                                opacity: 0,
+                                                transition: 'opacity 0.2s',
+                                                background: 'none',
+                                                border: 'none',
+                                                cursor: 'pointer',
+                                                padding: '4px',
+                                                fontSize: '14px',
+                                                flexShrink: 0,
+                                            }}
+                                            className="edit-btn"
+                                        >
+                                            ✏️
+                                        </button>
+                                    )}
+                                </div>
+                            )}
                         </div>
                     </div>
                     {timestampHtml}
                 </div>
             </div>
         );
-    }), [t]);
+    }), [t, chatEditingId, chatEditContent]);
 
     const handleChatScroll = () => {
         const el = chatContainerRef.current;
@@ -4604,6 +4652,7 @@ export default function AgentDetailPage() {
 
     return (
         <>
+            <style>{`.message-row:hover .edit-btn { opacity: 1 !important; }`}</style>
             <div className={`agent-detail-page ${activeTab === 'chat' ? 'agent-detail-page--chat' : 'agent-detail-page--settings'}`}>
                 {/* Header */}
                 {activeTab === 'chat' && (
