@@ -299,9 +299,10 @@ async def get_chat_history(
         .limit(200)
     )
     messages = result.scalars().all()
+    messages = [m for m in messages if not getattr(m, 'is_hidden', False)]
     out = []
     for m in messages:
-        entry: dict = {"role": m.role, "content": m.content, "created_at": m.created_at.isoformat() if m.created_at else None}
+        entry: dict = {"id": str(m.id), "role": m.role, "content": m.content, "created_at": m.created_at.isoformat() if m.created_at else None}
         if getattr(m, 'thinking', None):
             entry["thinking"] = m.thinking
         if m.role == "tool_call":
@@ -692,6 +693,7 @@ async def websocket_chat(
                             _sess.title = clean_title[:40] if clean_title else content[:40]
                     await db.commit()
                 logger.info("[WS] User message saved")
+                await websocket.send_json({"type": "user_saved", "message_id": str(user_msg.id)})
 
             # ── OpenClaw routing: insert into gateway_messages instead of LLM ──
             if agent_type == "openclaw":
@@ -1126,7 +1128,13 @@ async def websocket_chat(
             logger.info("[WS] Assistant message saved")
 
             # Final 'done' packet
-            await websocket.send_json({"type": "done", "role": "assistant", "content": assistant_response})
+            await websocket.send_json({
+                "type": "done",
+                "role": "assistant",
+                "content": assistant_response,
+                "message_id": str(assistant_msg.id),
+            })
+            logger.info("[WS] Response done sent to client")
 
             # Re-process any queued messages (if user sent something during generation)
             for qm in queued_messages:
