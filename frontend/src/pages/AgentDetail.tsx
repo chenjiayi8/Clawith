@@ -1251,8 +1251,8 @@ function AgentDetailInner() {
                 setChatMessages(prev => {
                     const last = prev[prev.length - 1];
                     const thinking = (last && last.role === 'assistant' && (last as any)._streaming) ? last.thinking : undefined;
-                    if (last && last.role === 'assistant' && (last as any)._streaming) return [...prev.slice(0, -1), { role: 'assistant', content: d.content, thinking, timestamp: new Date().toISOString() }];
-                    return [...prev, { role: d.role, content: d.content, timestamp: new Date().toISOString() }];
+                    if (last && last.role === 'assistant' && (last as any)._streaming) return [...prev.slice(0, -1), { role: 'assistant', content: d.content, thinking, id: d.message_id || undefined, timestamp: new Date().toISOString() }];
+                    return [...prev, { role: d.role, content: d.content, id: d.message_id || undefined, timestamp: new Date().toISOString() }];
                 });
                 fetchMySessions(true, agentId);
             } else if (d.type === 'error' || d.type === 'quota_exceeded') {
@@ -1281,6 +1281,18 @@ function AgentDetailInner() {
                     content: `⚠️ ${d.message}`,
                     isSkillIndicator: true,
                 }]);
+            } else if (d.type === 'user_saved') {
+                // Update the last user message with its persisted ID
+                setChatMessages(prev => {
+                    const updated = [...prev];
+                    for (let i = updated.length - 1; i >= 0; i--) {
+                        if (updated[i].role === 'user' && !updated[i].id) {
+                            updated[i] = { ...updated[i], id: d.message_id };
+                            break;
+                        }
+                    }
+                    return updated;
+                });
             } else if (d.type === 'edit_ack') {
                 setChatMessages(prev => {
                     const idx = prev.findIndex(m => m.id === d.message_id);
@@ -3579,6 +3591,7 @@ function AgentDetailInner() {
                                                 className="chat-input"
                                                 disabled={!wsConnected || isWaiting || isStreaming}
                                                 inputRef={chatInputRef}
+                                                onPaste={handlePaste}
                                             />
                                             {(isStreaming || isWaiting) ? (
                                                 <button className="btn btn-stop-generation" onClick={() => {
