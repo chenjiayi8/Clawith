@@ -45,9 +45,13 @@ async def _resolve_skill_content(
             ref_data = _load_reference_json(skills_dir, skill_name)
             if ref_data and sub_item in ref_data:
                 entry = ref_data[sub_item]
-                file_path = Path(settings.AGENCY_AGENTS_DIR) / entry["path"]
+                file_path = (Path(settings.AGENCY_AGENTS_DIR) / entry["path"]).resolve()
+                if not str(file_path).startswith(str(Path(settings.AGENCY_AGENTS_DIR).resolve())):
+                    return None, None, None
                 if not file_path.exists():
-                    file_path = skills_dir / skill_name / entry["path"]
+                    file_path = (skills_dir / skill_name / entry["path"]).resolve()
+                    if not str(file_path).startswith(str(skills_dir.resolve())):
+                        return None, None, None
                 if file_path.exists():
                     content = file_path.read_text(encoding="utf-8", errors="replace")
                     return content, entry.get("name", sub_item), entry.get("emoji", "")
@@ -686,7 +690,12 @@ async def websocket_chat(
                 from sqlalchemy import select as sa_select
                 async with async_session() as db:
                     edit_result = await db.execute(
-                        sa_select(ChatMessage).where(ChatMessage.id == edit_message_id)
+                        sa_select(ChatMessage).where(
+                            ChatMessage.id == edit_message_id,
+                            ChatMessage.conversation_id == conv_id,
+                            ChatMessage.agent_id == agent_id,
+                            ChatMessage.role == "user",
+                        )
                     )
                     edit_msg = edit_result.scalar_one_or_none()
                     if not edit_msg:
@@ -752,7 +761,7 @@ async def websocket_chat(
                         await db.execute(
                             ChatMessage.__table__.delete().where(
                                 ChatMessage.conversation_id == conv_id,
-                                ChatMessage.is_hidden == True,
+                                ChatMessage.is_hidden.is_(True),
                             )
                         )
                         await db.commit()
