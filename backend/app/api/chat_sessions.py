@@ -303,6 +303,7 @@ async def get_session_messages(
         .limit(500)
     )
     messages = msgs_result.scalars().all()
+    messages = [m for m in messages if not getattr(m, 'is_hidden', False)]
 
     # Resolve sender names for agent sessions
     sender_cache: dict = {}
@@ -319,7 +320,7 @@ async def get_session_messages(
 
         if m.role == "tool_call":
             import json
-            entry: dict = {"role": m.role, "content": m.content, "created_at": m.created_at.isoformat() if m.created_at else None}
+            entry: dict = {"id": str(m.id), "role": m.role, "content": m.content, "created_at": m.created_at.isoformat() if m.created_at else None}
             try:
                 data = json.loads(m.content)
                 entry["content"] = ""
@@ -344,7 +345,7 @@ async def get_session_messages(
                     part["participant_id"] = str(m.participant_id)
                 out.append(part)
         else:
-            entry = {"role": m.role, "content": m.content, "created_at": m.created_at.isoformat() if m.created_at else None}
+            entry = {"id": str(m.id), "role": m.role, "content": m.content, "created_at": m.created_at.isoformat() if m.created_at else None}
             if hasattr(m, 'thinking') and m.thinking:
                 entry["thinking"] = m.thinking
             if sender_name:
