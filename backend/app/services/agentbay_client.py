@@ -152,6 +152,186 @@ class AgentBayClient:
             "success": result.success,
         }
 
+    # ─── Browser: Extract & Observe ───────────────────
+
+    async def browser_extract(self, instruction: str, selector: str = "") -> dict:
+        """Extract structured data from current page using natural language instruction."""
+        await self._ensure_browser_initialized()
+
+        from agentbay._common.models.browser_operator import ExtractOptions
+        # Use a generic dict schema since we cannot define a Pydantic model at runtime
+        options = ExtractOptions(
+            instruction=instruction,
+            schema=dict,
+            selector=selector or None,
+        )
+        success, data = await asyncio.to_thread(
+            self._session.browser.operator.extract, options
+        )
+        return {"success": success, "data": data}
+
+    async def browser_observe(self, instruction: str, selector: str = "") -> dict:
+        """Observe the current page state and return interactive elements."""
+        await self._ensure_browser_initialized()
+
+        from agentbay._common.models.browser_operator import ObserveOptions
+        options = ObserveOptions(
+            instruction=instruction,
+            selector=selector or None,
+        )
+        success, results = await asyncio.to_thread(
+            self._session.browser.operator.observe, options
+        )
+        # Convert ObserveResult objects to dicts for serialization
+        result_dicts = []
+        for r in (results or []):
+            result_dicts.append(vars(r) if hasattr(r, "__dict__") else str(r))
+        return {"success": success, "elements": result_dicts}
+
+    # ─── Command (Shell) Operations ──────────────────
+
+    async def command_exec(self, command: str, timeout_ms: int = 50000, cwd: str = "") -> dict:
+        """Execute a shell command in the AgentBay environment."""
+        if not self._session:
+            await self.create_session("linux_latest")
+
+        result = await asyncio.to_thread(
+            self._session.command.exec,
+            command,
+            timeout_ms=timeout_ms,
+            cwd=cwd or None,
+        )
+        return {
+            "success": result.success,
+            "stdout": getattr(result, "stdout", "") or getattr(result, "output", "") or "",
+            "stderr": getattr(result, "stderr", "") or "",
+            "exit_code": getattr(result, "exit_code", -1),
+            "error_message": result.error_message or "",
+        }
+
+    # ─── Computer Operations ──────────────────────────
+
+    async def _ensure_computer_session(self):
+        """Ensure a computer (linux desktop) session is active."""
+        if not self._session or self._image_type not in ("computer", "linux_latest"):
+            await self.create_session("linux_latest")
+
+    async def computer_screenshot(self) -> dict:
+        """Take a screenshot of the desktop."""
+        await self._ensure_computer_session()
+        result = await asyncio.to_thread(self._session.computer.screenshot)
+        return {
+            "success": result.success,
+            "data": getattr(result, "data", None),
+            "error_message": result.error_message or "",
+        }
+
+    async def computer_click(self, x: int, y: int, button: str = "left") -> dict:
+        """Click the mouse at coordinates (x, y)."""
+        await self._ensure_computer_session()
+        result = await asyncio.to_thread(self._session.computer.click_mouse, x, y, button)
+        return {"success": result.success, "x": x, "y": y, "button": button}
+
+    async def computer_input_text(self, text: str) -> dict:
+        """Input text at the current cursor position."""
+        await self._ensure_computer_session()
+        result = await asyncio.to_thread(self._session.computer.input_text, text)
+        return {"success": result.success, "text": text}
+
+    async def computer_press_keys(self, keys: list, hold: bool = False) -> dict:
+        """Press keyboard keys (e.g. ['ctrl', 'c'] for Ctrl+C)."""
+        await self._ensure_computer_session()
+        result = await asyncio.to_thread(self._session.computer.press_keys, keys, hold=hold)
+        return {"success": result.success, "keys": keys, "hold": hold}
+
+    async def computer_scroll(self, x: int, y: int, direction: str = "down", amount: int = 1) -> dict:
+        """Scroll the screen at position (x, y)."""
+        await self._ensure_computer_session()
+        result = await asyncio.to_thread(
+            self._session.computer.scroll, x, y, direction=direction, amount=amount
+        )
+        return {"success": result.success, "direction": direction, "amount": amount}
+
+    async def computer_move_mouse(self, x: int, y: int) -> dict:
+        """Move mouse to coordinates (x, y) without clicking."""
+        await self._ensure_computer_session()
+        result = await asyncio.to_thread(self._session.computer.move_mouse, x, y)
+        return {"success": result.success, "x": x, "y": y}
+
+    async def computer_drag_mouse(
+        self, from_x: int, from_y: int, to_x: int, to_y: int, button: str = "left"
+    ) -> dict:
+        """Drag mouse from (from_x, from_y) to (to_x, to_y)."""
+        await self._ensure_computer_session()
+        result = await asyncio.to_thread(
+            self._session.computer.drag_mouse, from_x, from_y, to_x, to_y, button=button
+        )
+        return {"success": result.success, "from": [from_x, from_y], "to": [to_x, to_y]}
+
+    async def computer_get_screen_size(self) -> dict:
+        """Get the screen resolution."""
+        await self._ensure_computer_session()
+        result = await asyncio.to_thread(self._session.computer.get_screen_size)
+        return {
+            "success": result.success,
+            "data": getattr(result, "data", None),
+            "error_message": result.error_message or "",
+        }
+
+    async def computer_start_app(self, cmd: str, work_dir: str = "") -> dict:
+        """Start an application by its command."""
+        await self._ensure_computer_session()
+        result = await asyncio.to_thread(
+            self._session.computer.start_app, cmd, work_directory=work_dir
+        )
+        return {
+            "success": result.success,
+            "data": getattr(result, "data", None),
+            "error_message": result.error_message or "",
+        }
+
+    async def computer_get_cursor_position(self) -> dict:
+        """Get current cursor position."""
+        await self._ensure_computer_session()
+        result = await asyncio.to_thread(self._session.computer.get_cursor_position)
+        return {
+            "success": result.success,
+            "data": getattr(result, "data", None),
+            "error_message": result.error_message or "",
+        }
+
+    async def computer_get_active_window(self) -> dict:
+        """Get info about the currently active window."""
+        await self._ensure_computer_session()
+        result = await asyncio.to_thread(self._session.computer.get_active_window)
+        window = getattr(result, "window", None)
+        return {
+            "success": result.success,
+            "window": vars(window) if window and hasattr(window, "__dict__") else str(window),
+            "error_message": result.error_message or "",
+        }
+
+    async def computer_activate_window(self, window_id: int) -> dict:
+        """Activate (bring to front) a window by its ID."""
+        await self._ensure_computer_session()
+        result = await asyncio.to_thread(self._session.computer.activate_window, window_id)
+        return {"success": result.success, "window_id": window_id}
+
+    async def computer_list_visible_apps(self) -> dict:
+        """List currently visible/running applications."""
+        await self._ensure_computer_session()
+        result = await asyncio.to_thread(self._session.computer.list_visible_apps)
+        data = getattr(result, "data", [])
+        # Convert process objects to dicts
+        apps = []
+        for p in (data or []):
+            apps.append(vars(p) if hasattr(p, "__dict__") else str(p))
+        return {
+            "success": result.success,
+            "apps": apps,
+            "error_message": result.error_message or "",
+        }
+
     async def __aenter__(self):
         return self
 
@@ -268,6 +448,8 @@ async def get_agentbay_client_for_agent(agent_id: uuid.UUID, image_type: str) ->
 
     if image_type == "browser":
         await client.create_session("browser_latest")
+    elif image_type == "computer":
+        await client.create_session("linux_latest")
     else:
         await client.create_session("code_latest")
 
