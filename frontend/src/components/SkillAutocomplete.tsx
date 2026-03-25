@@ -229,6 +229,7 @@ export default function SkillAutocomplete({
                 value={value}
                 onChange={e => onChange(e.target.value)}
                 onKeyDown={handleKeyDown}
+                onPaste={onPaste}
                 placeholder={placeholder}
                 disabled={disabled}
                 onPaste={onPaste}
