@@ -558,41 +558,101 @@ async def websocket_chat(
             trace_id = str(_trace_uuid.uuid4())[:12]
             set_trace_id(trace_id)
 
-            content = data.get("content", "")
-            display_content = data.get("display_content", "")  # User-facing display text
-            file_name = data.get("file_name", "")  # Original file name for attachment display
+            msg_type = data.get("type", "message")
             override_model_id = data.get("model_id")  # Optional per-turn model switcher
-            # When the frontend fires an onboarding trigger for a (user, agent)
-            # pair that hasn't met before, it tags the message so the server can
-            # (a) skip persisting a user-side turn and (b) not echo any user
-            # bubble — the agent opens the conversation itself.
-            is_onboarding_trigger = data.get("kind") == "onboarding_trigger"
-            logger.info(f"[WS] Received: {content[:50]}" + (" [onboarding]" if is_onboarding_trigger else ""))
+            is_onboarding_trigger = False
 
-            if not content and not is_onboarding_trigger:
-                continue
-            if is_onboarding_trigger:
-                # Guard against stale triggers. A frontend with a cached
-                # agent query from before the ritual completed can fire an
-                # onboarding_trigger on a new session even though the pair
-                # is already locked. In that case the resolver would return
-                # no prompt, but the placeholder "Please begin the
-                # onboarding" would still reach the LLM and the agent would
-                # dutifully restart the ritual. Short-circuit here, emit an
-                # event so the frontend refreshes its cache, and move on.
-                from app.services.onboarding import is_onboarded as _is_onboarded
-                async with async_session() as _gdb:
-                    if await _is_onboarded(_gdb, agent_id, user_id):
-                        logger.info("[WS] Onboarding trigger ignored — pair already onboarded")
-                        await websocket.send_json({
-                            "type": "onboarded",
-                            "agent_id": str(agent_id),
-                        })
+            if msg_type == "edit":
+                edit_message_id = data.get("message_id")
+                edit_content = data.get("content", "")
+                if not edit_message_id or not edit_content:
+                    continue
+
+                from sqlalchemy import select as sa_select
+                async with async_session() as db:
+                    edit_result = await db.execute(
+                        sa_select(ChatMessage).where(ChatMessage.id == edit_message_id)
+                    )
+                    edit_msg = edit_result.scalar_one_or_none()
+                    if not edit_msg:
+                        await websocket.send_json({"type": "skill_error", "message": "Message not found"})
                         continue
-                # Minimal placeholder so the LLM has a valid user turn to anchor
-                # its greeting. The onboarding system prompt is what actually
-                # drives the reply; this text is never shown or saved.
-                content = "Please begin the onboarding."
+
+                    await db.execute(
+                        ChatMessage.__table__.delete().where(
+                            ChatMessage.conversation_id == conv_id,
+                            ChatMessage.created_at >= edit_msg.created_at,
+                            ChatMessage.id != edit_msg.id,
+                        )
+                    )
+                    edit_msg.content = edit_content
+                    await db.commit()
+
+                    rebuild_result = await db.execute(
+                        sa_select(ChatMessage)
+                        .where(ChatMessage.agent_id == agent_id, ChatMessage.conversation_id == conv_id)
+                        .order_by(ChatMessage.created_at.asc())
+                    )
+                    rebuild_msgs = rebuild_result.scalars().all()
+                    _rebuild_conversation_from_messages(rebuild_msgs, conversation, websocket)
+                    await websocket.send_json({"type": "edit_ack", "message_id": str(edit_msg.id)})
+
+                content = edit_content
+                display_content = ""
+                file_name = ""
+                skip_user_save = True
+                logger.info(f"[WS] Edit applied for message {edit_message_id}")
+            else:
+                skip_user_save = False
+                content = data.get("content", "")
+                display_content = data.get("display_content", "")  # User-facing display text
+                file_name = data.get("file_name", "")  # Original file name for attachment display
+                is_onboarding_trigger = data.get("kind") == "onboarding_trigger"
+                logger.info(f"[WS] Received: {content[:50]}" + (" [onboarding]" if is_onboarding_trigger else ""))
+
+                if not content and not is_onboarding_trigger:
+                    continue
+
+                if content.strip() == "/role:clear":
+                    async with async_session() as db:
+                        await db.execute(
+                            ChatMessage.__table__.delete().where(
+                                ChatMessage.conversation_id == conv_id,
+                                ChatMessage.is_hidden == True,
+                            )
+                        )
+                        await db.commit()
+                    hidden = getattr(websocket, "_hidden_indices", set())
+                    conversation[:] = [m for i, m in enumerate(conversation) if i not in hidden]
+                    websocket._hidden_indices = set()
+                    await websocket.send_json({"type": "skill_loaded", "name": "Roles cleared", "emoji": ""})
+                    continue
+
+                if is_onboarding_trigger:
+                    # Guard against stale triggers. A frontend with a cached
+                    # agent query from before the ritual completed can fire an
+                    # onboarding_trigger on a new session even though the pair
+                    # is already locked. In that case the resolver would return
+                    # no prompt, but the placeholder "Please begin the
+                    # onboarding" would still reach the LLM and the agent would
+                    # dutifully restart the ritual. Short-circuit here, emit an
+                    # event so the frontend refreshes its cache, and move on.
+                    from app.services.onboarding import is_onboarded as _is_onboarded
+                    async with async_session() as _gdb:
+                        if await _is_onboarded(_gdb, agent_id, user_id):
+                            logger.info("[WS] Onboarding trigger ignored — pair already onboarded")
+                            await websocket.send_json({
+                                "type": "onboarded",
+                                "agent_id": str(agent_id),
+                            })
+                            continue
+                    # Minimal placeholder so the LLM has a valid user turn to anchor
+                    # its greeting. The onboarding system prompt is what actually
+                    # drives the reply; this text is never shown or saved.
+                    content = "Please begin the onboarding."
+
+                async with async_session() as db:
+                    await _inject_skill_if_matched(content, agent_id, user_id, conv_id, db, conversation, websocket)
 
             # Per-message model override — the chat dropdown lets users pick a
             # different tenant-scoped model for this session. Override only the
