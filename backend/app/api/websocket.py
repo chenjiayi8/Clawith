@@ -1,7 +1,9 @@
 """WebSocket chat endpoint for real-time agent conversations."""
 
 import json
+import re
 import uuid
+from pathlib import Path
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Query
 from loguru import logger
@@ -18,6 +20,90 @@ from app.models.llm import LLMModel
 from app.models.user import User
 
 router = APIRouter(tags=["websocket"])
+
+# ── Skill prefix patterns ──
+_SKILL_WITH_SUB_RE = re.compile(r"^/([a-z0-9_-]+):([a-z0-9_-]+)")
+_SKILL_SIMPLE_RE = re.compile(r"^/([a-z0-9_-]+)")
+
+
+async def _resolve_skill_content(
+    skill_name: str,
+    sub_item: str | None,
+    agent_id: uuid.UUID,
+) -> tuple[str | None, str | None, str | None]:
+    """Resolve skill content from reference.json or SKILL.md.
+    Returns (content, display_name, emoji) or (None, None, None) if not found.
+    """
+    from app.services.skill_map import _load_reference_json
+    from app.services.agent_context import TOOL_WORKSPACE, PERSISTENT_DATA, _parse_skill_frontmatter
+    from app.config import settings
+
+    for ws_root in [TOOL_WORKSPACE / str(agent_id), PERSISTENT_DATA / str(agent_id)]:
+        skills_dir = ws_root / "skills"
+
+        if sub_item:
+            ref_data = _load_reference_json(skills_dir, skill_name)
+            if ref_data and sub_item in ref_data:
+                entry = ref_data[sub_item]
+                file_path = Path(settings.AGENCY_AGENTS_DIR) / entry["path"]
+                if not file_path.exists():
+                    file_path = skills_dir / skill_name / entry["path"]
+                if file_path.exists():
+                    content = file_path.read_text(encoding="utf-8", errors="replace")
+                    return content, entry.get("name", sub_item), entry.get("emoji", "")
+        else:
+            skill_dir = skills_dir / skill_name
+            if skill_dir.is_dir():
+                for fname in ("SKILL.md", "skill.md"):
+                    skill_md = skill_dir / fname
+                    if skill_md.exists():
+                        content = skill_md.read_text(encoding="utf-8", errors="replace")
+                        name, _ = _parse_skill_frontmatter(content, skill_name)
+                        return content, name, ""
+            flat = skills_dir / f"{skill_name}.md"
+            if flat.exists():
+                content = flat.read_text(encoding="utf-8", errors="replace")
+                name, _ = _parse_skill_frontmatter(content, skill_name)
+                return content, name, ""
+
+    return None, None, None
+
+
+async def _inject_skill_if_matched(content, agent_id, user_id, conv_id, db, conversation, websocket):
+    """Parse skill prefix from content and inject hidden context if found."""
+    skill_match = _SKILL_WITH_SUB_RE.match(content)
+    if skill_match:
+        s_name, s_sub = skill_match.group(1), skill_match.group(2)
+        skill_content, display_name, emoji = await _resolve_skill_content(s_name, s_sub, agent_id)
+        if skill_content:
+            await _persist_and_inject_skill(skill_content, agent_id, user_id, conv_id, db, conversation, websocket)
+            await websocket.send_json({"type": "skill_loaded", "name": display_name, "emoji": emoji})
+        else:
+            await websocket.send_json({"type": "skill_error", "message": f"Role '{s_sub}' not found"})
+        return
+
+    simple_match = _SKILL_SIMPLE_RE.match(content)
+    if simple_match:
+        s_name = simple_match.group(1)
+        skill_content, display_name, emoji = await _resolve_skill_content(s_name, None, agent_id)
+        if skill_content:
+            await _persist_and_inject_skill(skill_content, agent_id, user_id, conv_id, db, conversation, websocket)
+            await websocket.send_json({"type": "skill_loaded", "name": display_name, "emoji": emoji or ""})
+
+
+async def _persist_and_inject_skill(skill_content, agent_id, user_id, conv_id, db, conversation, websocket):
+    """Save hidden message to DB and add to in-memory conversation."""
+    hidden_msg = ChatMessage(
+        agent_id=agent_id, user_id=user_id,
+        role="user", content=skill_content,
+        conversation_id=conv_id, is_hidden=True,
+    )
+    db.add(hidden_msg)
+    await db.commit()
+    conversation.append({"role": "user", "content": skill_content})
+    if not hasattr(websocket, '_hidden_indices'):
+        websocket._hidden_indices = set()
+    websocket._hidden_indices.add(len(conversation) - 1)
 
 
 class ConnectionManager:
@@ -539,6 +625,8 @@ async def websocket_chat(
     # IMPORTANT: Include tool_call messages so the LLM maintains tool-calling behavior.
     # Without them, Claude sees user→assistant-text patterns and learns to skip tools.
     conversation: list[dict] = []
+    if not hasattr(websocket, '_hidden_indices'):
+        websocket._hidden_indices = set()
     for msg in history_messages:
         if msg.role == "tool_call":
             # Convert stored tool_call JSON into OpenAI-format assistant+tool pair
@@ -575,6 +663,8 @@ async def websocket_chat(
             if hasattr(msg, 'thinking') and msg.thinking:
                 entry["thinking"] = msg.thinking
             conversation.append(entry)
+            if getattr(msg, 'is_hidden', False):
+                websocket._hidden_indices.add(len(conversation) - 1)
 
     try:
         # Send welcome message on new session (no history)
@@ -584,13 +674,106 @@ async def websocket_chat(
         while True:
             logger.info(f"[WS] Waiting for message from {agent_name}...")
             data = await websocket.receive_json()
-            content = data.get("content", "")
-            display_content = data.get("display_content", "")  # User-facing display text
-            file_name = data.get("file_name", "")  # Original file name for attachment display
-            logger.info(f"[WS] Received: {content[:50]}")
+            msg_type = data.get("type", "message")
 
-            if not content:
-                continue
+            # ═══ Branch 1: Edit/retry ═══
+            if msg_type == "edit":
+                edit_message_id = data.get("message_id")
+                edit_content = data.get("content", "")
+                if not edit_message_id or not edit_content:
+                    continue
+
+                from sqlalchemy import select as sa_select
+                async with async_session() as db:
+                    edit_result = await db.execute(
+                        sa_select(ChatMessage).where(ChatMessage.id == edit_message_id)
+                    )
+                    edit_msg = edit_result.scalar_one_or_none()
+                    if not edit_msg:
+                        await websocket.send_json({"type": "skill_error", "message": "Message not found"})
+                        continue
+
+                    # Delete all messages after the edited one
+                    await db.execute(
+                        ChatMessage.__table__.delete().where(
+                            ChatMessage.conversation_id == conv_id,
+                            ChatMessage.created_at >= edit_msg.created_at,
+                            ChatMessage.id != edit_msg.id,
+                        )
+                    )
+                    edit_msg.content = edit_content
+                    await db.commit()
+
+                    # Rebuild conversation from DB
+                    rebuild_result = await db.execute(
+                        sa_select(ChatMessage)
+                        .where(ChatMessage.agent_id == agent_id, ChatMessage.conversation_id == conv_id)
+                        .order_by(ChatMessage.created_at.asc())
+                    )
+                    rebuild_msgs = rebuild_result.scalars().all()
+                    conversation.clear()
+                    websocket._hidden_indices = set()
+                    for idx, rmsg in enumerate(rebuild_msgs):
+                        if rmsg.role == "tool_call":
+                            try:
+                                tc_data = json.loads(rmsg.content)
+                                tc_id = f"call_{rmsg.id}"
+                                conversation.append({
+                                    "role": "assistant", "content": None,
+                                    "tool_calls": [{"id": tc_id, "type": "function",
+                                        "function": {"name": tc_data.get("name", "unknown"),
+                                                     "arguments": json.dumps(tc_data.get("args", {}), ensure_ascii=False)}}],
+                                })
+                                conversation.append({"role": "tool", "tool_call_id": tc_id,
+                                                     "content": str(tc_data.get("result", ""))[:500]})
+                            except Exception:
+                                continue
+                        else:
+                            conversation.append({"role": rmsg.role, "content": rmsg.content})
+                            if getattr(rmsg, 'is_hidden', False):
+                                websocket._hidden_indices.add(len(conversation) - 1)
+
+                    await websocket.send_json({"type": "edit_ack", "message_id": str(edit_msg.id)})
+
+                content = edit_content
+                display_content = ""
+                file_name = ""
+                skip_user_save = True
+                logger.info(f"[WS] Edit applied for message {edit_message_id}")
+
+            # ═══ Branch 2: Normal message ═══
+            else:
+                skip_user_save = False
+                content = data.get("content", "")
+
+                # Handle /role:clear
+                if content.strip() == "/role:clear":
+                    async with async_session() as db:
+                        await db.execute(
+                            ChatMessage.__table__.delete().where(
+                                ChatMessage.conversation_id == conv_id,
+                                ChatMessage.is_hidden == True,
+                            )
+                        )
+                        await db.commit()
+                    hidden = getattr(websocket, '_hidden_indices', set())
+                    conversation[:] = [m for i, m in enumerate(conversation) if i not in hidden]
+                    websocket._hidden_indices = set()
+                    await websocket.send_json({"type": "skill_loaded", "name": "Roles cleared", "emoji": ""})
+                    continue
+
+                display_content = data.get("display_content", "")  # User-facing display text
+                file_name = data.get("file_name", "")  # Original file name for attachment display
+                logger.info(f"[WS] Received: {content[:50]}")
+
+                if not content:
+                    continue
+
+                # Skill prefix parsing — inject hidden context before user message
+                async with async_session() as db:
+                    await _inject_skill_if_matched(content, agent_id, user_id, conv_id, db, conversation, websocket)
+
+            # ═══ Shared path: quota checks → save → LLM call ═══
 
             # ── Quota checks ──
             try:
@@ -608,44 +791,45 @@ async def websocket_chat(
                 await websocket.send_json({"type": "done", "role": "assistant", "content": f"⚠️ {ae.message}"})
                 continue
 
-            # Add user message to conversation (full LLM context)
-            conversation.append({"role": "user", "content": content})
+            if not skip_user_save:
+                # Add user message to conversation (full LLM context)
+                conversation.append({"role": "user", "content": content})
 
-            # Save user message — display_content for history display, content for LLM
-            # Prefix with [file:name] if there's a file attachment so history can show it
-            saved_content = display_content if display_content else content
-            if file_name:
-                saved_content = f"[file:{file_name}]\n{saved_content}"
-            async with async_session() as db:
-                user_msg = ChatMessage(
-                    agent_id=agent_id,
-                    user_id=user_id,
-                    role="user",
-                    content=saved_content,
-                    conversation_id=conv_id,
-                )
-                db.add(user_msg)
-                # Update session last_message_at + auto-title on first message
-                from app.models.chat_session import ChatSession as _CS
-                from datetime import datetime as _dt2, timezone as _tz2
-                _now = _dt2.now(_tz2.utc)
-                _sess_r = await db.execute(
-                    select(_CS).where(_CS.id == uuid.UUID(conv_id))
-                )
-                _sess = _sess_r.scalar_one_or_none()
-                if _sess:
-                    _sess.last_message_at = _now
-                    if not history_messages and _sess.title.startswith("Session "):
-                        # Use display_content for title (avoids raw base64/markers)
-                        title_src = display_content if display_content else content
-                        # Clean up common prefixes from image/file messages
-                        clean_title = title_src.replace("[图片] ", "📷 ").replace("[image_data:", "").strip()
-                        if file_name and not clean_title:
-                            clean_title = f"📎 {file_name}"
-                        _sess.title = clean_title[:40] if clean_title else content[:40]
-                await db.commit()
-            logger.info("[WS] User message saved")
-            await websocket.send_json({"type": "user_saved", "message_id": str(user_msg.id)})
+                # Save user message — display_content for history display, content for LLM
+                # Prefix with [file:name] if there's a file attachment so history can show it
+                saved_content = display_content if display_content else content
+                if file_name:
+                    saved_content = f"[file:{file_name}]\n{saved_content}"
+                async with async_session() as db:
+                    user_msg = ChatMessage(
+                        agent_id=agent_id,
+                        user_id=user_id,
+                        role="user",
+                        content=saved_content,
+                        conversation_id=conv_id,
+                    )
+                    db.add(user_msg)
+                    # Update session last_message_at + auto-title on first message
+                    from app.models.chat_session import ChatSession as _CS
+                    from datetime import datetime as _dt2, timezone as _tz2
+                    _now = _dt2.now(_tz2.utc)
+                    _sess_r = await db.execute(
+                        select(_CS).where(_CS.id == uuid.UUID(conv_id))
+                    )
+                    _sess = _sess_r.scalar_one_or_none()
+                    if _sess:
+                        _sess.last_message_at = _now
+                        if not history_messages and _sess.title.startswith("Session "):
+                            # Use display_content for title (avoids raw base64/markers)
+                            title_src = display_content if display_content else content
+                            # Clean up common prefixes from image/file messages
+                            clean_title = title_src.replace("[图片] ", "📷 ").replace("[image_data:", "").strip()
+                            if file_name and not clean_title:
+                                clean_title = f"📎 {file_name}"
+                            _sess.title = clean_title[:40] if clean_title else content[:40]
+                    await db.commit()
+                logger.info("[WS] User message saved")
+                await websocket.send_json({"type": "user_saved", "message_id": str(user_msg.id)})
 
             # ── OpenClaw routing: insert into gateway_messages instead of LLM ──
             if agent_type == "openclaw":
@@ -669,7 +853,6 @@ async def websocket_chat(
                 continue
 
             # Detect task creation intent
-            import re
             task_match = re.search(
                 r'(?:创建|新建|添加|建一个|帮我建|create|add)(?:一个|a )?(?:任务|待办|todo|task)[，,：：:\\s]*(.+)',
                 content, re.IGNORECASE
