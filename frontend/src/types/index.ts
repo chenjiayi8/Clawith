@@ -40,6 +40,16 @@ export interface Agent {
     openclaw_last_seen?: string;
     created_at: string;
     last_active_at?: string;
+    skill_map?: Record<string, {
+        has_sub_items: boolean;
+        description?: string;
+        items?: Array<{
+            key: string;
+            name: string;
+            emoji?: string;
+            description?: string;
+        }>;
+    }>;
 }
 
 export interface Task {
