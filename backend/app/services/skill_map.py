@@ -48,14 +48,15 @@ def _load_reference_json(agent_skills_dir: Path, skill_name: str) -> dict | None
         except Exception:
             pass
 
-    # 2. Global fallback (only for known skill names with global source)
-    global_dir = Path(settings.AGENCY_AGENTS_DIR)
-    global_ref = global_dir / "reference.json"
-    if global_ref.exists():
-        try:
-            return json.loads(global_ref.read_text(encoding="utf-8"))
-        except Exception:
-            pass
+    # 2. Global fallback (only for 'role' skill)
+    if skill_name == "role":
+        global_dir = Path(settings.AGENCY_AGENTS_DIR)
+        global_ref = global_dir / "reference.json"
+        if global_ref.exists():
+            try:
+                return json.loads(global_ref.read_text(encoding="utf-8"))
+            except Exception:
+                pass
 
     return None
 

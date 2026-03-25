@@ -22,6 +22,7 @@ interface SkillAutocompleteProps {
     className?: string;
     disabled?: boolean;
     inputRef?: React.RefObject<HTMLInputElement>;
+    onPaste?: React.ClipboardEventHandler<HTMLInputElement>;
 }
 
 interface DropdownItem {
@@ -41,6 +42,7 @@ export default function SkillAutocomplete({
     className,
     disabled,
     inputRef: externalRef,
+    onPaste,
 }: SkillAutocompleteProps) {
     const [showDropdown, setShowDropdown] = useState(false);
     const [selectedIndex, setSelectedIndex] = useState(0);
@@ -227,6 +229,7 @@ export default function SkillAutocomplete({
                 value={value}
                 onChange={e => onChange(e.target.value)}
                 onKeyDown={handleKeyDown}
+                onPaste={onPaste}
                 placeholder={placeholder}
                 disabled={disabled}
                 onBlur={() => {
