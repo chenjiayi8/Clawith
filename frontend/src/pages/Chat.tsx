@@ -52,6 +52,7 @@ interface ToolCall {
 }
 
 interface Message {
+    id?: string;
     role: 'user' | 'assistant';
     content: string;
     fileName?: string;
@@ -126,6 +127,7 @@ export default function Chat() {
             .then((history: any[]) => {
                 if (history.length > 0) setMessages(history.map(h => {
                     const msg = parseMessage({ role: h.role, content: h.content, fileName: h.fileName, toolCalls: h.toolCalls, thinking: h.thinking, imageUrl: h.imageUrl });
+                    msg.id = h.id;
                     msg.timestamp = h.created_at || undefined;
                     return msg;
                 }));
@@ -211,9 +213,21 @@ export default function Chat() {
                         const updated = [...prev];
                         // Replace the last streaming assistant message
                         if (updated.length > 0 && updated[updated.length - 1].role === 'assistant') {
-                            updated[updated.length - 1] = { role: 'assistant', content: data.content, toolCalls, thinking };
+                            updated[updated.length - 1] = { id: data.message_id, role: 'assistant', content: data.content, toolCalls, thinking };
                         } else {
-                            updated.push({ role: 'assistant', content: data.content, toolCalls, thinking });
+                            updated.push({ id: data.message_id, role: 'assistant', content: data.content, toolCalls, thinking });
+                        }
+                        return updated;
+                    });
+                } else if (data.type === 'user_saved') {
+                    // Update the last user message with its persisted ID
+                    setMessages(prev => {
+                        const updated = [...prev];
+                        for (let i = updated.length - 1; i >= 0; i--) {
+                            if (updated[i].role === 'user' && !updated[i].id) {
+                                updated[i] = { ...updated[i], id: data.message_id };
+                                break;
+                            }
                         }
                         return updated;
                     });
