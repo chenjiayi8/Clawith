@@ -3,6 +3,7 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useParams } from 'react-router-dom';
 import MarkdownRenderer from '../components/MarkdownRenderer';
+import SkillAutocomplete from '../components/SkillAutocomplete';
 import AgentBayLivePanel, { LivePreviewState } from '../components/AgentBayLivePanel';
 import ModelSwitcher from '../components/ModelSwitcher';
 import { agentApi, enterpriseApi, tenantApi, uploadFileWithProgress } from '../services/api';
@@ -56,6 +57,7 @@ interface Message {
     thinking?: string;
     imageUrl?: string;
     timestamp?: string;
+    isSkillIndicator?: boolean;
     _isToolGroup?: boolean;
 }
 
@@ -290,7 +292,7 @@ export default function Chat() {
     const userPinnedAwayFromBottomRef = useRef(false);
     const fileInputRef = useRef<HTMLInputElement>(null);
     // Ref to the chat textarea for direct DOM height manipulation
-    const textareaRef = useRef<HTMLTextAreaElement>(null);
+    const inputRef = useRef<HTMLInputElement>(null);
     const pendingToolCalls = useRef<ToolCall[]>([]);
     const streamContent = useRef('');
     const thinkingContent = useRef('');
@@ -670,6 +672,23 @@ export default function Chat() {
                         }
                         return updated;
                     });
+                } else if (data.type === 'skill_loaded') {
+                    setMessages(prev => [...prev, {
+                        role: 'assistant',
+                        content: `${data.emoji || ''} ${data.name} loaded`.trim(),
+                        isSkillIndicator: true,
+                    }]);
+                } else if (data.type === 'skill_error') {
+                    setMessages(prev => [...prev, {
+                        role: 'assistant',
+                        content: `⚠️ ${data.message}`,
+                        isSkillIndicator: true,
+                    }]);
+                } else if (data.type === 'edit_ack') {
+                    setMessages(prev => {
+                        const idx = prev.findIndex(m => m.id === data.message_id);
+                        return idx >= 0 ? prev.slice(0, idx + 1) : prev;
+                    });
                 } else {
                     // Legacy format: {role, content}
                     setMessages(prev => [...prev, { role: data.role, content: data.content }]);
@@ -691,7 +710,7 @@ export default function Chat() {
     // Auto-focus input when connection is established
     useEffect(() => {
         if (connected) {
-            setTimeout(() => textareaRef.current?.focus(), 50);
+            setTimeout(() => inputRef.current?.focus(), 50);
         }
     }, [connected]);
 
@@ -813,18 +832,6 @@ export default function Chat() {
         setAttachedFile(null);
     };
 
-    const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
-        // Enter sends the message; Shift+Enter inserts a newline
-        if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing && !isWaiting && !streaming) {
-            e.preventDefault();
-            sendMessage();
-        }
-    };
-
-    const handleInputChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
-        setInput(e.target.value);
-    };
-
     const hasLiveData = !!(liveState.desktop || liveState.browser || liveState.code);
 
     // ── Drag-and-drop file upload ──
@@ -913,7 +920,21 @@ export default function Chat() {
                         if (m.role === 'assistant' && !m._isToolGroup && !(m.content && m.content.trim()) && !m.toolCalls?.length && !m.thinking) return false;
                         return true;
                     }).map((msg, i) => (
-                        msg._isToolGroup ? (
+                        msg.isSkillIndicator ? (
+                            <div key={i} style={{ display: 'flex', justifyContent: 'center' }}>
+                                <div style={{
+                                    display: 'inline-block',
+                                    padding: '4px 12px',
+                                    borderRadius: '12px',
+                                    background: 'var(--bg-secondary, #2a2a2a)',
+                                    color: 'var(--text-secondary, #888)',
+                                    fontSize: '12px',
+                                    margin: '4px 0',
+                                }}>
+                                    {msg.content}
+                                </div>
+                            </div>
+                        ) : msg._isToolGroup ? (
                             /* Tool call group — compact display without avatar bubble */
                             <div key={i} style={{ marginLeft: '48px', marginBottom: '8px' }}>
                                 {msg.toolCalls && msg.toolCalls.length > 0 && (
@@ -1041,15 +1062,15 @@ export default function Chat() {
                             </div>
                         )}
                         <div className="chat-composer-input-block">
-                            <textarea
-                                ref={textareaRef}
-                                className="chat-input"
+                            <SkillAutocomplete
                                 value={input}
-                                onChange={handleInputChange}
-                                onKeyDown={handleKeyDown}
-                                placeholder={t('chat.placeholder')}
-                                disabled={!connected}
-                                rows={1}
+                                onChange={setInput}
+                                onSubmit={sendMessage}
+                                skillMap={agent?.skill_map || {}}
+                                placeholder={attachedFile ? t('agent.chat.askAboutFile', { name: attachedFile.name }) : t('chat.placeholder')}
+                                className="chat-input"
+                                disabled={!connected || isWaiting || streaming}
+                                inputRef={inputRef}
                             />
                         </div>
                         <div className="chat-composer-toolbar">

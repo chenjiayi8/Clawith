@@ -9,6 +9,7 @@ import { useToast } from '../../components/Toast/ToastProvider';
 import type { FileBrowserApi } from '../../components/FileBrowser';
 import FileBrowser from '../../components/FileBrowser';
 import MarkdownRenderer from '../../components/MarkdownRenderer';
+import SkillAutocomplete from '../../components/SkillAutocomplete';
 import PromptModal from '../../components/PromptModal';
 import type { LivePreviewState } from '../../components/AgentBayLivePanel';
 import AgentSidePanel, { SidePanelTab } from '../../components/AgentSidePanel';
@@ -2502,7 +2503,7 @@ export default function AgentDetailPage() {
         } catch (e: any) { toast.error('保存失败', { details: String(e?.message || e) }); }
         setExpirySaving(false);
     };
-    interface ChatMsg { role: 'user' | 'assistant' | 'tool_call'; content: string; fileName?: string; toolName?: string; toolCallId?: string; toolArgs?: any; toolStatus?: 'running' | 'done'; toolResult?: string; toolThinking?: string; thinking?: string; imageUrl?: string; timestamp?: string; }
+    interface ChatMsg { role: 'user' | 'assistant' | 'tool_call'; content: string; id?: string; fileName?: string; toolName?: string; toolCallId?: string; toolArgs?: any; toolStatus?: 'running' | 'done'; toolResult?: string; toolThinking?: string; thinking?: string; imageUrl?: string; timestamp?: string; isSkillIndicator?: boolean; }
     const [chatMessages, setChatMessages] = useState<ChatMsg[]>([]);
     const getToolTargetKey = (args: any): string => {
         if (!args) return '';
@@ -2592,7 +2593,7 @@ export default function AgentDetailPage() {
 
     const chatEndRef = useRef<HTMLDivElement>(null);
     const chatContainerRef = useRef<HTMLDivElement>(null);
-    const chatInputRef = useRef<HTMLTextAreaElement>(null);
+    const chatInputRef = useRef<HTMLInputElement>(null);
     const chatInputAreaRef = useRef<HTMLDivElement>(null);
     const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -3169,6 +3170,23 @@ export default function AgentDetailPage() {
                 }
                 fetchMySessions(true, agentId);
                 queryClient.invalidateQueries({ queryKey: ['agents'] });
+            } else if (d.type === 'skill_loaded') {
+                setChatMessages(prev => [...prev, {
+                    role: 'assistant',
+                    content: `${d.emoji || ''} ${d.name} loaded`.trim(),
+                    isSkillIndicator: true,
+                }]);
+            } else if (d.type === 'skill_error') {
+                setChatMessages(prev => [...prev, {
+                    role: 'assistant',
+                    content: `⚠️ ${d.message}`,
+                    isSkillIndicator: true,
+                }]);
+            } else if (d.type === 'edit_ack') {
+                setChatMessages(prev => {
+                    const idx = prev.findIndex(m => m.id === d.message_id);
+                    return idx >= 0 ? prev.slice(0, idx + 1) : prev;
+                });
             } else if (d.type === 'info') {
                 // Subtle transient banner for system events (e.g. fallback model switch)
                 setChatInfoMsg(d.content || '');
@@ -6088,6 +6106,23 @@ export default function AgentDetailPage() {
                                                         );
                                                     }
                                                     const { msg, i } = entry;
+                                                    if (msg.isSkillIndicator) {
+                                                        return (
+                                                            <div key={i} style={{ display: 'flex', justifyContent: 'center' }}>
+                                                                <div style={{
+                                                                    display: 'inline-block',
+                                                                    padding: '4px 12px',
+                                                                    borderRadius: '12px',
+                                                                    background: 'var(--bg-secondary, #2a2a2a)',
+                                                                    color: 'var(--text-secondary, #888)',
+                                                                    fontSize: '12px',
+                                                                    margin: '4px 0',
+                                                                }}>
+                                                                    {msg.content}
+                                                                </div>
+                                                            </div>
+                                                        );
+                                                    }
                                                     // All remaining messages have real content; render as chat bubbles
                                                     if (msg.role === 'assistant' && msg.thinking) {
                                                         const contentText = msg.content?.trim() || '';
@@ -6239,28 +6274,16 @@ export default function AgentDetailPage() {
                                                 </div>
                                             )}
                                             <div className="chat-composer-input-block">
-                                                <textarea
-                                                    ref={chatInputRef}
-                                                    className="chat-input"
-                                                    disabled={showNoModelState}
+                                                <SkillAutocomplete
                                                     value={chatInput}
-                                                    onChange={e => {
-                                                        setChatInput(e.target.value);
-                                                        // Auto-grow: reset height then expand to scrollHeight
-                                                        const el = e.target;
-                                                        el.style.height = 'auto';
-                                                        el.style.height = el.scrollHeight + 'px';
-                                                    }}
-                                                    onKeyDown={e => {
-                                                        // Enter sends the message; Shift+Enter inserts a newline
-                                                        if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing && !isWaiting && !isStreaming) {
-                                                            e.preventDefault();
-                                                            sendChatMsg();
-                                                        }
-                                                    }}
-                                                    onPaste={handlePaste}
+                                                    onChange={setChatInput}
+                                                    onSubmit={sendChatMsg}
+                                                    skillMap={agent?.skill_map || {}}
                                                     placeholder={showNoModelState ? t('agent.chat.noModelPlaceholder', 'Configure a company model to start chatting') : (!wsConnected && !!currentUser && sessionUserIdStr(activeSession) === viewerUserIdStr() ? 'Connecting...' : t('chat.placeholder'))}
-                                                    rows={1}
+                                                    className="chat-input"
+                                                    disabled={showNoModelState || isWaiting || isStreaming}
+                                                    inputRef={chatInputRef}
+                                                    onPaste={handlePaste}
                                                 />
                                             </div>
                                             <div className="chat-composer-toolbar">
