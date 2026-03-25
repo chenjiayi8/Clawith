@@ -571,7 +571,12 @@ async def websocket_chat(
                 from sqlalchemy import select as sa_select
                 async with async_session() as db:
                     edit_result = await db.execute(
-                        sa_select(ChatMessage).where(ChatMessage.id == edit_message_id)
+                        sa_select(ChatMessage).where(
+                            ChatMessage.id == edit_message_id,
+                            ChatMessage.conversation_id == conv_id,
+                            ChatMessage.agent_id == agent_id,
+                            ChatMessage.role == "user",
+                        )
                     )
                     edit_msg = edit_result.scalar_one_or_none()
                     if not edit_msg:
@@ -618,7 +623,7 @@ async def websocket_chat(
                         await db.execute(
                             ChatMessage.__table__.delete().where(
                                 ChatMessage.conversation_id == conv_id,
-                                ChatMessage.is_hidden == True,
+                                ChatMessage.is_hidden.is_(True),
                             )
                         )
                         await db.commit()
