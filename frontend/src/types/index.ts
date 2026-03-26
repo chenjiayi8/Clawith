@@ -55,14 +55,9 @@ export interface Agent {
     created_at: string;
     last_active_at?: string;
     skill_map?: Record<string, {
-        has_sub_items: boolean;
+        name: string;
+        emoji?: string;
         description?: string;
-        items?: Array<{
-            key: string;
-            name: string;
-            emoji?: string;
-            description?: string;
-        }>;
     }>;
 }
 
