@@ -14,8 +14,8 @@ interface SkillAutocompleteProps {
     placeholder?: string;
     className?: string;
     disabled?: boolean;
-    inputRef?: React.RefObject<HTMLInputElement | null>;
-    onPaste?: React.ClipboardEventHandler<HTMLInputElement>;
+    inputRef?: React.RefObject<HTMLTextAreaElement | null>;
+    onPaste?: React.ClipboardEventHandler<HTMLTextAreaElement>;
 }
 
 interface DropdownItem {
@@ -26,6 +26,10 @@ interface DropdownItem {
     emoji?: string;
     description?: string;
 }
+
+const MAX_ROWS = 10;
+const LINE_HEIGHT = 20; // px per row
+const PADDING_Y = 10; // top + bottom padding
 
 export default function SkillAutocomplete({
     value,
@@ -41,9 +45,19 @@ export default function SkillAutocomplete({
     const [showDropdown, setShowDropdown] = useState(false);
     const [selectedIndex, setSelectedIndex] = useState(0);
     const [items, setItems] = useState<DropdownItem[]>([]);
-    const internalRef = useRef<HTMLInputElement>(null);
+    const internalRef = useRef<HTMLTextAreaElement>(null);
     const ref = externalRef || internalRef;
     const dropdownRef = useRef<HTMLDivElement>(null);
+
+    // Auto-resize textarea
+    useEffect(() => {
+        const el = ref.current;
+        if (!el) return;
+        el.style.height = 'auto';
+        const maxHeight = LINE_HEIGHT * MAX_ROWS + PADDING_Y;
+        el.style.height = Math.min(el.scrollHeight, maxHeight) + 'px';
+        el.style.overflowY = el.scrollHeight > maxHeight ? 'auto' : 'hidden';
+    }, [value, ref]);
 
     useEffect(() => {
         if (!skillMap || !value.startsWith('/')) {
@@ -101,16 +115,14 @@ export default function SkillAutocomplete({
 
     const selectItem = useCallback((item: DropdownItem) => {
         if (item.isLeaf && !hasChildren(item)) {
-            // Pure leaf — select and close
             onChange(`/${item.fullKey} `);
             setShowDropdown(false);
         } else {
-            // Has children (whether or not it's also a leaf) — drill down
             onChange(`/${item.fullKey}:`);
         }
     }, [onChange, hasChildren]);
 
-    const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
         if (showDropdown) {
             if (e.key === 'ArrowDown') {
                 e.preventDefault();
@@ -126,7 +138,6 @@ export default function SkillAutocomplete({
                 e.preventDefault();
                 const item = items[selectedIndex];
                 if (item.isLeaf) {
-                    // Enter always selects as leaf (even if it has children)
                     onChange(`/${item.fullKey} `);
                     setShowDropdown(false);
                 } else {
@@ -146,6 +157,7 @@ export default function SkillAutocomplete({
             }
         }
 
+        // Enter without Shift submits; Shift+Enter inserts newline
         if (e.key === 'Enter' && !e.shiftKey && !showDropdown) {
             e.preventDefault();
             onSubmit();
@@ -160,10 +172,11 @@ export default function SkillAutocomplete({
     }, [selectedIndex, showDropdown]);
 
     return (
-        <div style={{ position: 'relative', width: '100%' }}>
+        <div style={{ position: 'relative', width: '100%', display: 'flex', alignItems: 'flex-end' }}>
             {showDropdown && (
                 <div
                     ref={dropdownRef}
+                    onMouseDown={e => e.preventDefault()}
                     style={{
                         position: 'absolute',
                         bottom: '100%',
@@ -212,7 +225,7 @@ export default function SkillAutocomplete({
                     ))}
                 </div>
             )}
-            <input
+            <textarea
                 ref={ref}
                 className={className}
                 value={value}
@@ -221,6 +234,7 @@ export default function SkillAutocomplete({
                 placeholder={placeholder}
                 disabled={disabled}
                 onPaste={onPaste}
+                rows={1}
                 onBlur={() => {
                     setTimeout(() => setShowDropdown(false), 200);
                 }}

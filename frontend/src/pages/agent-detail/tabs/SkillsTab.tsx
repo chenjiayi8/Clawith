@@ -74,6 +74,7 @@ export default function SkillsTab(props: Props) {
     const [zipPreview, setZipPreview] = useState<{ root_folder: string; files: string[]; total: number } | null>(null);
     const [zipRootName, setZipRootName] = useState('');
     const [zipUploading, setZipUploading] = useState(false);
+    const [skillsBrowserPath, setSkillsBrowserPath] = useState('skills');
     const adapter: FileBrowserApi = {
         list: (path) => fileApi.list(agentId, path),
         read: (path) => fileApi.read(agentId, path),
@@ -143,7 +144,7 @@ export default function SkillsTab(props: Props) {
                 </div>
             </div>
 
-            <FileBrowser api={adapter} rootPath="skills" features={{ newFile: true, edit: true, delete: canManage, newFolder: true, upload: true, directoryNavigation: true }} title={t('agent.skills.skillFiles')} />
+            <FileBrowser api={adapter} rootPath="skills" features={{ newFile: true, edit: true, delete: canManage, newFolder: true, upload: true, directoryNavigation: true }} title={t('agent.skills.skillFiles')} onPathChange={setSkillsBrowserPath} />
 
             {showAgentClawhub && (
                 <div style={{ position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, background: 'rgba(0,0,0,0.5)', zIndex: 1000, display: 'flex', alignItems: 'center', justifyContent: 'center' }} onClick={() => setShowAgentClawhub(false)}>
@@ -388,7 +389,7 @@ export default function SkillsTab(props: Props) {
                                         style={{ width: '100%', fontSize: '13px', boxSizing: 'border-box' }}
                                     />
                                     <p style={{ fontSize: '12px', color: 'var(--text-secondary)', marginTop: '4px' }}>
-                                        Will extract to: skills/{zipRootName ? zipRootName + '/' : ''}...
+                                        Will extract to: {skillsBrowserPath}/{zipRootName ? zipRootName + '/' : ''}...
                                     </p>
                                 </div>
 
@@ -414,8 +415,9 @@ export default function SkillsTab(props: Props) {
                                             try {
                                                 const token = localStorage.getItem('token');
                                                 const formData = new FormData();
+                                                const subPath = skillsBrowserPath.startsWith('skills/') ? skillsBrowserPath.slice(7) : '';
                                                 formData.append('file', zipFile);
-                                                formData.append('target_path', '');
+                                                formData.append('target_path', subPath);
                                                 formData.append('root_name', zipRootName);
                                                 const res = await fetch(`/api/agents/${agentId}/files/extract-zip`, {
                                                     method: 'POST',
