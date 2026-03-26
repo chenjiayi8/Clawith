@@ -1020,7 +1020,7 @@ function AgentDetailInner() {
     const wsRef = useRef<WebSocket | null>(null);
     const chatEndRef = useRef<HTMLDivElement>(null);
     const chatContainerRef = useRef<HTMLDivElement>(null);
-    const chatInputRef = useRef<HTMLInputElement>(null);
+    const chatInputRef = useRef<HTMLTextAreaElement>(null);
     const fileInputRef = useRef<HTMLInputElement>(null);
 
     // Settings form local state
@@ -1558,6 +1558,7 @@ function AgentDetailInner() {
     const [zipPreview, setZipPreview] = useState<{ root_folder: string; files: string[]; total: number } | null>(null);
     const [zipRootName, setZipRootName] = useState('');
     const [zipUploading, setZipUploading] = useState(false);
+    const [skillsBrowserPath, setSkillsBrowserPath] = useState('skills');
 
     const { data: schedules = [] } = useQuery({
         queryKey: ['schedules', id],
@@ -2865,7 +2866,7 @@ function AgentDetailInner() {
                                         • <code>skills/my-skill/SKILL.md</code> — {t('agent.skills.folderFormat', 'Each skill is a folder with a SKILL.md file and optional auxiliary files (scripts/, examples/)')}
                                     </div>
                                 </div>
-                                <FileBrowser api={adapter} rootPath="skills" features={{ newFile: true, edit: true, delete: true, newFolder: true, upload: true, directoryNavigation: true }} title={t('agent.skills.skillFiles')} />
+                                <FileBrowser api={adapter} rootPath="skills" features={{ newFile: true, edit: true, delete: true, newFolder: true, upload: true, directoryNavigation: true }} title={t('agent.skills.skillFiles')} onPathChange={setSkillsBrowserPath} />
 
                                 {/* Browse ClawHub Modal */}
                                 {showAgentClawhub && (
@@ -3113,7 +3114,7 @@ function AgentDetailInner() {
                                                             style={{ width: '100%', fontSize: '13px', boxSizing: 'border-box' }}
                                                         />
                                                         <p style={{ fontSize: '12px', color: 'var(--text-secondary)', marginTop: '4px' }}>
-                                                            Will extract to: skills/{zipRootName ? zipRootName + '/' : ''}...
+                                                            Will extract to: {skillsBrowserPath}/{zipRootName ? zipRootName + '/' : ''}...
                                                         </p>
                                                     </div>
 
@@ -3139,8 +3140,9 @@ function AgentDetailInner() {
                                                                 try {
                                                                     const token = localStorage.getItem('token');
                                                                     const formData = new FormData();
+                                                                    const subPath = skillsBrowserPath.startsWith('skills/') ? skillsBrowserPath.slice(7) : '';
                                                                     formData.append('file', zipFile);
-                                                                    formData.append('target_path', '');
+                                                                    formData.append('target_path', subPath);
                                                                     formData.append('root_name', zipRootName);
                                                                     const res = await fetch(`/api/agents/${id}/files/extract-zip`, {
                                                                         method: 'POST',

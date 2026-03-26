@@ -43,6 +43,7 @@ export interface FileBrowserProps {
     title?: string;
     readOnly?: boolean;
     onRefresh?: () => void;
+    onPathChange?: (path: string) => void;
 }
 
 // ─── Text file detection ───────────────────────────────
@@ -68,6 +69,7 @@ export default function FileBrowser({
     title,
     readOnly = false,
     onRefresh,
+    onPathChange,
 }: FileBrowserProps) {
     const { t } = useTranslation();
     const {
@@ -80,7 +82,11 @@ export default function FileBrowser({
     } = features;
 
     // ─── State ─────────────────────────────────────────
-    const [currentPath, setCurrentPath] = useState(rootPath);
+    const [currentPath, setCurrentPathRaw] = useState(rootPath);
+    const setCurrentPath = useCallback((path: string) => {
+        setCurrentPathRaw(path);
+        onPathChange?.(path);
+    }, [onPathChange]);
     const [files, setFiles] = useState<FileItem[]>([]);
     const [loading, setLoading] = useState(false);
     const [contentLoaded, setContentLoaded] = useState(false);
