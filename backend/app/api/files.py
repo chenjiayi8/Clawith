@@ -10,7 +10,7 @@ import zipfile
 from pathlib import Path
 
 import aiofiles
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, Form, HTTPException, status
 from fastapi.responses import FileResponse, Response
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel
@@ -833,6 +833,11 @@ async def preview_zip(
     try:
         with zipfile.ZipFile(io.BytesIO(content)) as zf:
             names = zf.namelist()
+            # Check total uncompressed size (max 500MB)
+            MAX_UNCOMPRESSED = 500 * 1024 * 1024
+            total_uncompressed = sum(i.file_size for i in zf.infolist())
+            if total_uncompressed > MAX_UNCOMPRESSED:
+                raise HTTPException(status_code=400, detail=f"Zip uncompressed size too large (max 500MB, got {total_uncompressed // 1024 // 1024}MB)")
             if len(names) > MAX_ZIP_FILES:
                 raise HTTPException(status_code=400, detail=f"Too many files (max {MAX_ZIP_FILES})")
 
@@ -854,8 +859,8 @@ async def preview_zip(
 async def extract_zip(
     agent_id: uuid.UUID,
     file: UploadFileType = FastFile(...),
-    target_path: str = "",
-    root_name: str = "",
+    target_path: str = Form(""),
+    root_name: str = Form(""),
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
@@ -879,6 +884,11 @@ async def extract_zip(
     try:
         with zipfile.ZipFile(io.BytesIO(content)) as zf:
             names = zf.namelist()
+            # Check total uncompressed size (max 500MB)
+            MAX_UNCOMPRESSED = 500 * 1024 * 1024
+            total_uncompressed = sum(i.file_size for i in zf.infolist())
+            if total_uncompressed > MAX_UNCOMPRESSED:
+                raise HTTPException(status_code=400, detail=f"Zip uncompressed size too large (max 500MB, got {total_uncompressed // 1024 // 1024}MB)")
             if len(names) > MAX_ZIP_FILES:
                 raise HTTPException(status_code=400, detail=f"Too many files (max {MAX_ZIP_FILES})")
 
