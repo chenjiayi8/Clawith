@@ -1553,6 +1553,11 @@ function AgentDetailInner() {
     const [showAgentUrlImport, setShowAgentUrlImport] = useState(false);
     const [agentUrlInput, setAgentUrlInput] = useState('');
     const [agentUrlImporting, setAgentUrlImporting] = useState(false);
+    const [showZipModal, setShowZipModal] = useState(false);
+    const [zipFile, setZipFile] = useState<File | null>(null);
+    const [zipPreview, setZipPreview] = useState<{ root_folder: string; files: string[]; total: number } | null>(null);
+    const [zipRootName, setZipRootName] = useState('');
+    const [zipUploading, setZipUploading] = useState(false);
 
     const { data: schedules = [] } = useQuery({
         queryKey: ['schedules', id],
@@ -2841,6 +2846,18 @@ function AgentDetailInner() {
                                             >
                                                 Import from Presets
                                             </button>
+                                            <button
+                                                onClick={() => {
+                                                    setShowZipModal(true);
+                                                    setZipFile(null);
+                                                    setZipPreview(null);
+                                                    setZipRootName('');
+                                                }}
+                                                className="btn btn-outline"
+                                                style={{ display: 'flex', alignItems: 'center', gap: '4px' }}
+                                            >
+                                                Import Skill Package
+                                            </button>
                                         </div>
                                     </div>
                                     <div style={{ marginTop: '8px', padding: '10px 14px', background: 'var(--bg-secondary)', borderRadius: '8px', fontSize: '12px', color: 'var(--text-secondary)', lineHeight: 1.6 }}>
@@ -3033,6 +3050,120 @@ function AgentDetailInner() {
                                                     ))
                                                 )}
                                             </div>
+                                        </div>
+                                    </div>
+                                )}
+
+                                {/* Import Skill Package (Zip) Modal */}
+                                {showZipModal && (
+                                    <div style={{ position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, background: 'rgba(0,0,0,0.5)', zIndex: 1000, display: 'flex', alignItems: 'center', justifyContent: 'center' }} onClick={() => setShowZipModal(false)}>
+                                        <div onClick={e => e.stopPropagation()} style={{ background: 'var(--bg-primary)', borderRadius: '12px', padding: '24px', maxWidth: '600px', width: '90%', boxShadow: '0 20px 60px rgba(0,0,0,0.3)' }}>
+                                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px' }}>
+                                                <h3>Import Skill Package</h3>
+                                                <button onClick={() => setShowZipModal(false)} style={{ background: 'none', border: 'none', fontSize: '18px', cursor: 'pointer', color: 'var(--text-secondary)', padding: '4px 8px' }}>x</button>
+                                            </div>
+
+                                            {!zipPreview ? (
+                                                <div>
+                                                    <p style={{ color: 'var(--text-secondary)', marginBottom: '16px', fontSize: '13px' }}>
+                                                        Select a .zip file containing skill definitions (.md files with YAML frontmatter).
+                                                    </p>
+                                                    <input
+                                                        type="file"
+                                                        accept=".zip"
+                                                        onChange={async (e) => {
+                                                            const f = e.target.files?.[0];
+                                                            if (!f) return;
+                                                            setZipFile(f);
+                                                            const formData = new FormData();
+                                                            formData.append('file', f);
+                                                            try {
+                                                                const token = localStorage.getItem('token');
+                                                                const res = await fetch(`/api/agents/${id}/files/preview-zip`, {
+                                                                    method: 'POST',
+                                                                    headers: { Authorization: `Bearer ${token}` },
+                                                                    body: formData,
+                                                                });
+                                                                if (!res.ok) throw new Error(await res.text());
+                                                                const data = await res.json();
+                                                                setZipPreview(data);
+                                                                setZipRootName(data.root_folder || '');
+                                                            } catch (err: any) {
+                                                                alert('Failed to preview zip: ' + err.message);
+                                                            }
+                                                        }}
+                                                    />
+                                                </div>
+                                            ) : (
+                                                <div>
+                                                    <p style={{ marginBottom: '8px', fontSize: '13px' }}>
+                                                        <strong>{zipPreview.total}</strong> files found in zip
+                                                    </p>
+
+                                                    <div style={{ marginBottom: '16px' }}>
+                                                        <label style={{ display: 'block', marginBottom: '4px', fontSize: '14px' }}>
+                                                            Extract as folder:
+                                                        </label>
+                                                        <input
+                                                            className="input"
+                                                            type="text"
+                                                            value={zipRootName}
+                                                            onChange={e => setZipRootName(e.target.value)}
+                                                            placeholder="(empty = extract contents directly)"
+                                                            style={{ width: '100%', fontSize: '13px', boxSizing: 'border-box' }}
+                                                        />
+                                                        <p style={{ fontSize: '12px', color: 'var(--text-secondary)', marginTop: '4px' }}>
+                                                            Will extract to: skills/{zipRootName ? zipRootName + '/' : ''}...
+                                                        </p>
+                                                    </div>
+
+                                                    <div style={{ maxHeight: '200px', overflowY: 'auto', fontSize: '12px', background: 'var(--bg-secondary)', padding: '8px', borderRadius: '4px', marginBottom: '16px' }}>
+                                                        {zipPreview.files.slice(0, 20).map((f, i) => (
+                                                            <div key={i} style={{ padding: '2px 0', color: 'var(--text-secondary)' }}>{f}</div>
+                                                        ))}
+                                                        {zipPreview.total > 20 && (
+                                                            <div style={{ padding: '2px 0', color: 'var(--text-secondary)', fontStyle: 'italic' }}>
+                                                                ...and {zipPreview.total - 20} more files
+                                                            </div>
+                                                        )}
+                                                    </div>
+
+                                                    <div style={{ display: 'flex', gap: '8px', justifyContent: 'flex-end' }}>
+                                                        <button className="btn btn-secondary" onClick={() => setShowZipModal(false)}>Cancel</button>
+                                                        <button
+                                                            className="btn btn-primary"
+                                                            disabled={zipUploading}
+                                                            onClick={async () => {
+                                                                if (!zipFile) return;
+                                                                setZipUploading(true);
+                                                                try {
+                                                                    const token = localStorage.getItem('token');
+                                                                    const formData = new FormData();
+                                                                    formData.append('file', zipFile);
+                                                                    formData.append('target_path', '');
+                                                                    formData.append('root_name', zipRootName);
+                                                                    const res = await fetch(`/api/agents/${id}/files/extract-zip`, {
+                                                                        method: 'POST',
+                                                                        headers: { Authorization: `Bearer ${token}` },
+                                                                        body: formData,
+                                                                    });
+                                                                    if (!res.ok) throw new Error(await res.text());
+                                                                    const data = await res.json();
+                                                                    alert(`Extracted ${data.extracted} files successfully`);
+                                                                    setShowZipModal(false);
+                                                                    queryClient.invalidateQueries({ queryKey: ['files', id, 'skills'] });
+                                                                } catch (err: any) {
+                                                                    alert('Failed to extract: ' + err.message);
+                                                                } finally {
+                                                                    setZipUploading(false);
+                                                                }
+                                                            }}
+                                                        >
+                                                            {zipUploading ? 'Extracting...' : 'Extract'}
+                                                        </button>
+                                                    </div>
+                                                </div>
+                                            )}
                                         </div>
                                     </div>
                                 )}
