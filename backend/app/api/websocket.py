@@ -31,7 +31,9 @@ async def _resolve_skill_content(
     skill_key: str,
     agent_id: uuid.UUID,
 ) -> tuple[str | None, str | None, str | None]:
-    """Resolve skill content by colon key lookup."""
+    """Resolve skill content by colon key lookup.
+    Returns (content, display_name, emoji) or (None, None, None) if not found.
+    """
     import asyncio
 
     from app.services.agent_context import _agent_workspace
