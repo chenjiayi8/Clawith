@@ -106,13 +106,19 @@ def get_skill_map(agent_id: UUID) -> dict[str, Any]:
         if now - ts < _CACHE_TTL:
             return result
 
-    from app.services.agent_context import _agent_workspace
+    from app.services.agent_context import TOOL_WORKSPACE, PERSISTENT_DATA
 
-    skills_dir = _agent_workspace(agent_id) / "skills"
-    result = _scan_skills_dir(skills_dir)
+    merged: dict[str, dict[str, str]] = {}
 
-    _cache[cache_key] = (now, result)
-    return result
+    for ws_root in [TOOL_WORKSPACE / str(agent_id), PERSISTENT_DATA / str(agent_id)]:
+        skills_dir = ws_root / "skills"
+        scanned = _scan_skills_dir(skills_dir)
+        for key, entry in scanned.items():
+            if key not in merged:
+                merged[key] = entry
+
+    _cache[cache_key] = (now, merged)
+    return merged
 
 
 def get_skill_map_for_api(agent_id: UUID) -> dict[str, Any]:
