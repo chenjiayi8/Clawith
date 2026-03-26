@@ -29,7 +29,7 @@ interface DropdownItem {
 
 const MAX_ROWS = 10;
 const LINE_HEIGHT = 20; // px per row
-const PADDING_Y = 10; // top + bottom padding
+const PADDING_Y = 20; // top (10px) + bottom (10px) padding
 
 export default function SkillAutocomplete({
     value,

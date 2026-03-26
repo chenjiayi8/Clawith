@@ -87,6 +87,9 @@ export default function FileBrowser({
         setCurrentPathRaw(path);
         onPathChange?.(path);
     }, [onPathChange]);
+
+    // Fire onPathChange on mount so parent starts in sync
+    useEffect(() => { onPathChange?.(rootPath); }, []);
     const [files, setFiles] = useState<FileItem[]>([]);
     const [loading, setLoading] = useState(false);
     const [contentLoaded, setContentLoaded] = useState(false);
