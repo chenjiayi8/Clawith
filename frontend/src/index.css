@@ -7123,7 +7123,7 @@ select:focus {
 .chat-composer .chat-input {
   flex: 1;
   min-height: 40px;
-  max-height: 210px;
+  max-height: 220px;
   background: var(--bg-secondary);
   border: 1px solid var(--border-default);
   border-radius: 8px;
