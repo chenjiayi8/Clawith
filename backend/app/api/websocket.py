@@ -3,7 +3,6 @@
 import json
 import re
 import uuid
-from pathlib import Path
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Query
 from loguru import logger
@@ -21,79 +20,58 @@ from app.models.user import User
 
 router = APIRouter(tags=["websocket"])
 
-# ── Skill prefix patterns ──
-_SKILL_WITH_SUB_RE = re.compile(r"^/([a-z0-9_-]+):([a-z0-9_-]+)")
-_SKILL_SIMPLE_RE = re.compile(r"^/([a-z0-9_-]+)")
+# ── Skill prefix pattern (any depth) ──
+_SKILL_RE = re.compile(r"^/([a-z0-9_-]+(?::[a-z0-9_-]+)*)")
 
 
-async def _resolve_skill_content(
-    skill_name: str,
-    sub_item: str | None,
+def _resolve_skill_content(
+    skill_key: str,
     agent_id: uuid.UUID,
 ) -> tuple[str | None, str | None, str | None]:
-    """Resolve skill content from reference.json or SKILL.md.
+    """Resolve skill content by colon key lookup.
     Returns (content, display_name, emoji) or (None, None, None) if not found.
     """
-    from app.services.skill_map import _load_reference_json
-    from app.services.agent_context import TOOL_WORKSPACE, PERSISTENT_DATA, _parse_skill_frontmatter
-    from app.config import get_settings
-    _settings = get_settings()
+    from app.services.skill_map import get_skill_map
+    from app.services.agent_context import TOOL_WORKSPACE, PERSISTENT_DATA
 
+    skill_map = get_skill_map(agent_id)
+    entry = skill_map.get(skill_key)
+    if not entry:
+        return None, None, None
+
+    file_rel = entry.get("file")
+    if not file_rel:
+        return None, None, None
+
+    # Try both workspace roots
     for ws_root in [TOOL_WORKSPACE / str(agent_id), PERSISTENT_DATA / str(agent_id)]:
-        skills_dir = ws_root / "skills"
-
-        if sub_item:
-            ref_data = _load_reference_json(skills_dir, skill_name)
-            if ref_data and sub_item in ref_data:
-                entry = ref_data[sub_item]
-                file_path = (Path(_settings.AGENCY_AGENTS_DIR) / entry["path"]).resolve()
-                if not str(file_path).startswith(str(Path(_settings.AGENCY_AGENTS_DIR).resolve())):
-                    return None, None, None
-                if not file_path.exists():
-                    file_path = (skills_dir / skill_name / entry["path"]).resolve()
-                    if not str(file_path).startswith(str(skills_dir.resolve())):
-                        return None, None, None
-                if file_path.exists():
-                    content = file_path.read_text(encoding="utf-8", errors="replace")
-                    return content, entry.get("name", sub_item), entry.get("emoji", "")
-        else:
-            skill_dir = skills_dir / skill_name
-            if skill_dir.is_dir():
-                for fname in ("SKILL.md", "skill.md"):
-                    skill_md = skill_dir / fname
-                    if skill_md.exists():
-                        content = skill_md.read_text(encoding="utf-8", errors="replace")
-                        name, _ = _parse_skill_frontmatter(content, skill_name)
-                        return content, name, ""
-            flat = skills_dir / f"{skill_name}.md"
-            if flat.exists():
-                content = flat.read_text(encoding="utf-8", errors="replace")
-                name, _ = _parse_skill_frontmatter(content, skill_name)
-                return content, name, ""
+        file_path = (ws_root / "skills" / file_rel).resolve()
+        skills_root = (ws_root / "skills").resolve()
+        # Path traversal check
+        if not str(file_path).startswith(str(skills_root)):
+            continue
+        if file_path.exists():
+            content = file_path.read_text(encoding="utf-8", errors="replace")
+            return content, entry.get("name", skill_key), entry.get("emoji", "")
 
     return None, None, None
 
 
 async def _inject_skill_if_matched(content, agent_id, user_id, conv_id, db, conversation, websocket):
     """Parse skill prefix from content and inject hidden context if found."""
-    skill_match = _SKILL_WITH_SUB_RE.match(content)
-    if skill_match:
-        s_name, s_sub = skill_match.group(1), skill_match.group(2)
-        skill_content, display_name, emoji = await _resolve_skill_content(s_name, s_sub, agent_id)
-        if skill_content:
-            await _persist_and_inject_skill(skill_content, agent_id, user_id, conv_id, db, conversation, websocket)
-            await websocket.send_json({"type": "skill_loaded", "name": display_name, "emoji": emoji})
-        else:
-            await websocket.send_json({"type": "skill_error", "message": f"Role '{s_sub}' not found"})
+    match = _SKILL_RE.match(content)
+    if not match:
         return
 
-    simple_match = _SKILL_SIMPLE_RE.match(content)
-    if simple_match:
-        s_name = simple_match.group(1)
-        skill_content, display_name, emoji = await _resolve_skill_content(s_name, None, agent_id)
-        if skill_content:
-            await _persist_and_inject_skill(skill_content, agent_id, user_id, conv_id, db, conversation, websocket)
-            await websocket.send_json({"type": "skill_loaded", "name": display_name, "emoji": emoji or ""})
+    skill_key = match.group(1)
+    skill_content, display_name, emoji = _resolve_skill_content(skill_key, agent_id)
+    if skill_content:
+        await _persist_and_inject_skill(skill_content, agent_id, user_id, conv_id, db, conversation, websocket)
+        await websocket.send_json({"type": "skill_loaded", "name": display_name, "emoji": emoji or ""})
+    elif ":" in skill_key:
+        # Explicit colon path that doesn't resolve — send error
+        await websocket.send_json({"type": "skill_error", "message": f"Skill '{skill_key}' not found"})
+    # Simple /word with no match — treat as normal message, no error
 
 
 async def _persist_and_inject_skill(skill_content, agent_id, user_id, conv_id, db, conversation, websocket):
