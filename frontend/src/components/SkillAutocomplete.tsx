@@ -1,23 +1,16 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 
-interface SkillItem {
-    key: string;
+interface SkillMapEntry {
     name: string;
     emoji?: string;
     description?: string;
-}
-
-interface SkillEntry {
-    has_sub_items: boolean;
-    description?: string;
-    items?: SkillItem[];
 }
 
 interface SkillAutocompleteProps {
     value: string;
     onChange: (value: string) => void;
     onSubmit: () => void;
-    skillMap: Record<string, SkillEntry>;
+    skillMap: Record<string, SkillMapEntry>;
     placeholder?: string;
     className?: string;
     disabled?: boolean;
@@ -26,11 +19,12 @@ interface SkillAutocompleteProps {
 }
 
 interface DropdownItem {
-    key: string;
-    label: string;
+    segment: string;
+    fullKey: string;
+    isLeaf: boolean;
+    name?: string;
     emoji?: string;
     description?: string;
-    isSkill: boolean;
 }
 
 export default function SkillAutocomplete({
@@ -51,83 +45,64 @@ export default function SkillAutocomplete({
     const ref = externalRef || internalRef;
     const dropdownRef = useRef<HTMLDivElement>(null);
 
-    const getAutocompleteState = useCallback((val: string) => {
-        if (!val.startsWith('/')) return { mode: 'none' as const, query: '' };
-
-        const withSub = val.match(/^\/([a-z0-9_-]+):(.*)$/);
-        if (withSub) {
-            return { mode: 'sub' as const, skill: withSub[1], query: withSub[2] };
-        }
-
-        const simple = val.match(/^\/([a-z0-9_-]*)$/);
-        if (simple) {
-            return { mode: 'top' as const, query: simple[1] };
-        }
-
-        return { mode: 'none' as const, query: '' };
-    }, []);
-
     useEffect(() => {
-        if (!skillMap || Object.keys(skillMap).length === 0) {
+        if (!skillMap || !value.startsWith('/')) {
             setShowDropdown(false);
             return;
         }
 
-        const state = getAutocompleteState(value);
-
-        if (state.mode === 'top') {
-            const query = state.query.toLowerCase();
-            const filtered = Object.entries(skillMap)
-                .map(([key, entry]) => ({
-                    key,
-                    label: key,
-                    description: entry.description,
-                    isSkill: true,
-                }))
-                .filter(item => item.key.includes(query));
-            setItems(filtered);
-            setShowDropdown(filtered.length > 0);
-            setSelectedIndex(0);
-        } else if (state.mode === 'sub') {
-            const skill = skillMap[state.skill!];
-            if (skill?.has_sub_items && skill.items) {
-                const query = state.query.toLowerCase();
-                const filtered = skill.items
-                    .filter(item => item.key.includes(query) || item.name.toLowerCase().includes(query))
-                    .map(item => ({
-                        key: item.key,
-                        label: item.key,
-                        emoji: item.emoji,
-                        description: item.description,
-                        isSkill: false,
-                    }));
-                setItems(filtered);
-                setShowDropdown(filtered.length > 0);
-                setSelectedIndex(0);
-            } else {
-                setShowDropdown(false);
-            }
-        } else {
+        const keys = Object.keys(skillMap);
+        if (keys.length === 0) {
             setShowDropdown(false);
+            return;
         }
-    }, [value, skillMap, getAutocompleteState]);
+
+        const raw = value.slice(1);
+        const prefix = raw.endsWith(':') ? raw : raw.includes(':') ? raw.slice(0, raw.lastIndexOf(':') + 1) : '';
+        const query = raw.endsWith(':') ? '' : (raw.includes(':') ? raw.slice(raw.lastIndexOf(':') + 1) : raw);
+
+        const matching = keys.filter(k => k.startsWith(prefix));
+
+        const segmentMap = new Map<string, DropdownItem>();
+        for (const key of matching) {
+            const rest = key.slice(prefix.length);
+            const nextColon = rest.indexOf(':');
+            const segment = nextColon >= 0 ? rest.slice(0, nextColon) : rest;
+
+            if (!segment) continue;
+            if (query && !segment.toLowerCase().includes(query.toLowerCase())) continue;
+
+            if (!segmentMap.has(segment)) {
+                const fullKey = prefix + segment;
+                const isLeaf = fullKey in skillMap;
+                const entry = isLeaf ? skillMap[fullKey] : undefined;
+                const hasChildren = keys.some(k => k.startsWith(fullKey + ':'));
+
+                segmentMap.set(segment, {
+                    segment,
+                    fullKey,
+                    isLeaf,
+                    name: entry?.name || segment,
+                    emoji: entry?.emoji,
+                    description: entry?.description || (hasChildren && !isLeaf ? 'Package' : undefined),
+                });
+            }
+        }
+
+        const filtered = Array.from(segmentMap.values());
+        setItems(filtered);
+        setShowDropdown(filtered.length > 0);
+        setSelectedIndex(0);
+    }, [value, skillMap]);
 
     const selectItem = useCallback((item: DropdownItem) => {
-        const state = getAutocompleteState(value);
-
-        if (state.mode === 'top' && item.isSkill) {
-            const skill = skillMap[item.key];
-            if (skill?.has_sub_items) {
-                onChange(`/${item.key}:`);
-            } else {
-                onChange(`/${item.key} `);
-                setShowDropdown(false);
-            }
-        } else if (state.mode === 'sub') {
-            onChange(`/${state.skill}:${item.key} `);
+        if (item.isLeaf) {
+            onChange(`/${item.fullKey} `);
             setShowDropdown(false);
+        } else {
+            onChange(`/${item.fullKey}:`);
         }
-    }, [value, skillMap, onChange, getAutocompleteState]);
+    }, [onChange]);
 
     const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
         if (showDropdown) {
@@ -166,8 +141,8 @@ export default function SkillAutocomplete({
 
     useEffect(() => {
         if (showDropdown && dropdownRef.current) {
-            const selected = dropdownRef.current.children[selectedIndex] as HTMLElement;
-            selected?.scrollIntoView({ block: 'nearest' });
+            const el = dropdownRef.current.children[selectedIndex] as HTMLElement;
+            el?.scrollIntoView({ block: 'nearest' });
         }
     }, [selectedIndex, showDropdown]);
 
@@ -193,7 +168,7 @@ export default function SkillAutocomplete({
                 >
                     {items.map((item, i) => (
                         <div
-                            key={item.key}
+                            key={item.fullKey}
                             onClick={() => selectItem(item)}
                             style={{
                                 padding: '8px 12px',
@@ -206,7 +181,8 @@ export default function SkillAutocomplete({
                             }}
                         >
                             {item.emoji && <span>{item.emoji}</span>}
-                            <span style={{ fontWeight: 500 }}>{item.label}</span>
+                            <span style={{ fontWeight: 500 }}>{item.segment}</span>
+                            {!item.isLeaf && <span style={{ color: 'var(--text-secondary, #888)', fontSize: '11px' }}>▸</span>}
                             {item.description && (
                                 <span style={{
                                     color: 'var(--text-secondary, #888)',
@@ -229,9 +205,9 @@ export default function SkillAutocomplete({
                 value={value}
                 onChange={e => onChange(e.target.value)}
                 onKeyDown={handleKeyDown}
-                onPaste={onPaste}
                 placeholder={placeholder}
                 disabled={disabled}
+                onPaste={onPaste}
                 onBlur={() => {
                     setTimeout(() => setShowDropdown(false), 200);
                 }}
