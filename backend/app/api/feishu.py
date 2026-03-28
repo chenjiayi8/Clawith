@@ -497,7 +497,7 @@ async def process_feishu_event(agent_id: uuid.UUID, body: dict, db: AsyncSession
                 IdentityProvider.tenant_id == (agent_obj.tenant_id if agent_obj else None)
             )
             provider_result = await db.execute(provider_query)
-            provider = provider_result.scalar_one_or_none()
+            provider = provider_result.scalars().first()
             
             if not provider:
                 provider = IdentityProvider(
@@ -524,7 +524,7 @@ async def process_feishu_event(agent_id: uuid.UUID, body: dict, db: AsyncSession
                     )
                 )
                 member_result = await db.execute(member_query)
-                member = member_result.scalar_one_or_none()
+                member = member_result.scalars().first()
                 if member and member.user_id:
                     platform_user_id = member.user_id
                     logger.info(f"[Feishu] Matched user via OrgMember: {platform_user_id}")
@@ -559,7 +559,7 @@ async def process_feishu_event(agent_id: uuid.UUID, body: dict, db: AsyncSession
                     )
                 )
             )
-            member = member_check.scalar_one_or_none()
+            member = member_check.scalars().first()
             if not member:
                 member = OrgMember(
                     name=sender_name or f"Feishu User {sender_open_id[:8]}",
@@ -959,7 +959,7 @@ async def _handle_feishu_file(db, agent_id, config, message, sender_open_id, cha
                     IdentityProviderModel.tenant_id == agent_obj.tenant_id,
                 )
             )
-            _provider = _pr.scalar_one_or_none()
+            _provider = _pr.scalars().first()
             if _provider and (sender_user_id_feishu or sender_open_id):
                 _mr = await db.execute(
                     _select(OrgMemberModel).where(
@@ -972,17 +972,17 @@ async def _handle_feishu_file(db, agent_id, config, message, sender_open_id, cha
                         )
                     )
                 )
-                _member = _mr.scalar_one_or_none()
+                _member = _mr.scalars().first()
                 if _member and _member.user_id:
                     _ur = await db.execute(_select(UserModel).where(UserModel.id == _member.user_id))
-                    _pu = _ur.scalar_one_or_none()
+                    _pu = _ur.scalars().first()
         if sender_user_id_feishu:
             _ur = await db.execute(_select(UserModel).where(UserModel.feishu_user_id == sender_user_id_feishu))
-            _pu = _ur.scalar_one_or_none()
+            _pu = _ur.scalars().first()
         if not _pu:
             _un = f"feishu_{sender_user_id_feishu or sender_open_id[:16]}"
             _ur = await db.execute(_select(UserModel).where(UserModel.username == _un))
-            _pu = _ur.scalar_one_or_none()
+            _pu = _ur.scalars().first()
         if not _pu:
             _un = f"feishu_{sender_user_id_feishu or sender_open_id[:16]}"
             _pu = UserModel(
