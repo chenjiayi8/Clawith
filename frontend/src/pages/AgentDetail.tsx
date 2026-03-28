@@ -10,6 +10,7 @@ import ChannelConfig from '../components/ChannelConfig';
 import MarkdownRenderer from '../components/MarkdownRenderer';
 import PromptModal from '../components/PromptModal';
 import OpenClawSettings from './OpenClawSettings';
+import AgentBayLivePanel, { LivePreviewState } from '../components/AgentBayLivePanel';
 import { activityApi, agentApi, channelApi, enterpriseApi, fileApi, scheduleApi, skillApi, taskApi, triggerApi, uploadFileWithProgress } from '../services/api';
 import { useAuthStore } from '../stores';
 
@@ -1151,6 +1152,8 @@ function AgentDetailInner() {
     };
     interface ChatMsg { role: 'user' | 'assistant' | 'tool_call'; content: string; fileName?: string; toolName?: string; toolArgs?: any; toolStatus?: 'running' | 'done'; toolResult?: string; thinking?: string; imageUrl?: string; timestamp?: string; }
     const [chatMessages, setChatMessages] = useState<ChatMsg[]>([]);
+    const [liveState, setLiveState] = useState<LivePreviewState>({});
+    const [livePanelVisible, setLivePanelVisible] = useState(false);
     const [chatInput, setChatInput] = useState('');
     const [wsConnected, setWsConnected] = useState(false);
     const [uploading, setUploading] = useState(false);
@@ -1374,6 +1377,22 @@ function AgentDetailInner() {
                     return [...prev, { role: 'assistant', content: '', thinking: d.content, _streaming: true } as any];
                 });
             } else if (d.type === 'tool_call') {
+                if (d.live_preview) {
+                    const lp = d.live_preview;
+                    setLiveState(prev => {
+                        const next = { ...prev };
+                        if ((lp.env === 'desktop' || lp.env === 'browser') && lp.screenshot_url) {
+                            const imgUrl = lp.screenshot_url + '&_t=' + Date.now();
+                            if (lp.env === 'desktop') next.desktop = { screenshotUrl: imgUrl };
+                            else next.browser = { screenshotUrl: imgUrl };
+                        } else if (lp.env === 'code' && lp.output) {
+                            const existing = prev.code?.output || '';
+                            next.code = { output: existing + (existing ? '\n---\n' : '') + lp.output };
+                        }
+                        return next;
+                    });
+                    setLivePanelVisible(true);
+                }
                 setChatMessages(prev => {
                     const toolMsg: ChatMsg = { role: 'tool_call', content: '', toolName: d.name, toolArgs: d.args, toolStatus: d.status, toolResult: d.result };
                     if (d.status === 'done') {
@@ -3389,7 +3408,8 @@ function AgentDetailInner() {
                             </div>
 
                             {/* ── Right: chat/message area ── */}
-                            <div style={{ flex: 1, display: 'flex', flexDirection: 'column', position: 'relative', minWidth: 0, overflow: 'hidden' }}>
+                            <div className={`agent-chat-area ${ !!(liveState.desktop || liveState.browser || liveState.code) ? 'has-live-panel' : ''}`} style={{ flex: 1, display: 'flex', flexDirection: 'row', position: 'relative', minWidth: 0, overflow: 'hidden' }}>
+                                <div style={{ flex: 1, display: 'flex', flexDirection: 'column', position: 'relative', minWidth: 0, overflow: 'hidden' }}>
                                 {!activeSession ? (
                                     <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--text-tertiary)', fontSize: '13px', flexDirection: 'column', gap: '8px' }}>
                                         <div>{t('agent.chat.noSessionSelected')}</div>
@@ -3623,6 +3643,15 @@ function AgentDetailInner() {
                                             )}
                                         </div>
                                     </>
+                                )}
+                                </div>
+                                {/* Live Panel */}
+                                {!!(liveState.desktop || liveState.browser || liveState.code) && (
+                                    <AgentBayLivePanel
+                                        liveState={liveState}
+                                        visible={livePanelVisible}
+                                        onToggle={() => setLivePanelVisible(v => !v)}
+                                    />
                                 )}
                             </div>
                         </div>
