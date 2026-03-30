@@ -2170,9 +2170,12 @@ export default function AgentDetailPage() {
     const [editingSessionId, setEditingSessionId] = useState<string | null>(null);
     const [editingTitle, setEditingTitle] = useState('');
     const longPressTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+    const editingSessionIdRef = useRef<string | null>(null);
     const currentAgentIdRef = useRef<string | undefined>(id);
     const sessionMsgAbortRef = useRef<AbortController | null>(null);
     const sessionLoadSeqRef = useRef(0);
+
+    useEffect(() => { editingSessionIdRef.current = editingSessionId; }, [editingSessionId]);
 
     const saveSessionTitle = async (sessionId: string, newTitle: string) => {
         const trimmed = newTitle.trim();
@@ -3226,6 +3229,16 @@ export default function AgentDetailPage() {
                     const idx = prev.findIndex(m => m.id === d.message_id);
                     return idx >= 0 ? prev.slice(0, idx + 1) : prev;
                 });
+            } else if (d.type === 'session_title_updated') {
+                const newTitle = d.title;
+                const sessId = d.session_id;
+                if (editingSessionIdRef.current !== sessId) {
+                    setSessions(prev => prev.map((s: any) => s.id === sessId ? { ...s, title: newTitle } : s));
+                    setAllSessions(prev => prev.map((s: any) => s.id === sessId ? { ...s, title: newTitle } : s));
+                    if (activeSessionIdRef.current === sessId) {
+                        setActiveSession((prev: any) => prev ? { ...prev, title: newTitle } : prev);
+                    }
+                }
             } else if (d.type === 'info') {
                 // Subtle transient banner for system events (e.g. fallback model switch)
                 setChatInfoMsg(d.content || '');
