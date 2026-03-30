@@ -796,9 +796,38 @@ function AgentDetailInner() {
     const reconnectDisabledRef = useRef<Record<SessionRuntimeKey, boolean>>({});
     const sessionUiStateRef = useRef<Record<SessionRuntimeKey, { isWaiting: boolean; isStreaming: boolean }>>({});
     const activeSessionIdRef = useRef<string | null>(null);
+    const [editingSessionId, setEditingSessionId] = useState<string | null>(null);
+    const [editingTitle, setEditingTitle] = useState('');
+    const longPressTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+    const editingSessionIdRef = useRef<string | null>(null);
     const currentAgentIdRef = useRef<string | undefined>(id);
     const sessionMsgAbortRef = useRef<AbortController | null>(null);
     const sessionLoadSeqRef = useRef(0);
+
+    useEffect(() => { editingSessionIdRef.current = editingSessionId; }, [editingSessionId]);
+
+    const saveSessionTitle = async (sessionId: string, newTitle: string) => {
+        const trimmed = newTitle.trim();
+        if (!trimmed || !id) return;
+        setEditingSessionId(null);
+        try {
+            const tkn = localStorage.getItem('token');
+            const res = await fetch(`/api/agents/${id}/sessions/${sessionId}`, {
+                method: 'PATCH',
+                headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${tkn}` },
+                body: JSON.stringify({ title: trimmed }),
+            });
+            if (res.ok) {
+                setSessions(prev => prev.map(s => s.id === sessionId ? { ...s, title: trimmed } : s));
+                setAllSessions(prev => prev.map(s => s.id === sessionId ? { ...s, title: trimmed } : s));
+                if (activeSession?.id === sessionId) {
+                    setActiveSession((prev: any) => prev ? { ...prev, title: trimmed } : prev);
+                }
+            }
+        } catch (e) {
+            console.error('Failed to rename session:', e);
+        }
+    };
 
     const buildSessionRuntimeKey = (agentId: string, sessionId: string) => `${agentId}:${sessionId}`;
 
@@ -3252,7 +3281,30 @@ function AgentDetailInner() {
                                                     onMouseEnter={e => { if (!isActive) e.currentTarget.style.background = 'var(--bg-secondary)'; const btn = e.currentTarget.querySelector('.del-btn') as HTMLElement; if (btn) btn.style.opacity = '0.5'; }}
                                                     onMouseLeave={e => { if (!isActive) e.currentTarget.style.background = 'transparent'; const btn = e.currentTarget.querySelector('.del-btn') as HTMLElement; if (btn) btn.style.opacity = '0'; }}>
                                                     <div style={{ display: 'flex', alignItems: 'center', gap: '5px', marginBottom: '2px' }}>
-                                                        <div style={{ fontSize: '12px', fontWeight: isActive ? 600 : 400, color: 'var(--text-primary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }}>{s.title}</div>
+                                                        {editingSessionId === s.id ? (
+                                                            <input
+                                                                autoFocus
+                                                                value={editingTitle}
+                                                                onChange={e => setEditingTitle(e.target.value)}
+                                                                onKeyDown={e => {
+                                                                    if (e.key === 'Enter') saveSessionTitle(s.id, editingTitle);
+                                                                    if (e.key === 'Escape') setEditingSessionId(null);
+                                                                }}
+                                                                onBlur={() => saveSessionTitle(s.id, editingTitle)}
+                                                                onClick={e => e.stopPropagation()}
+                                                                style={{ fontSize: '12px', fontWeight: 600, color: 'var(--text-primary)', width: '100%', border: '1px solid var(--accent-primary)', borderRadius: '3px', padding: '1px 4px', outline: 'none', background: 'var(--bg-primary)' }}
+                                                            />
+                                                        ) : (
+                                                            <div
+                                                                style={{ fontSize: '12px', fontWeight: isActive ? 600 : 400, color: 'var(--text-primary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }}
+                                                                onDoubleClick={(e) => { e.stopPropagation(); setEditingSessionId(s.id); setEditingTitle(s.title); }}
+                                                                onTouchStart={() => { longPressTimerRef.current = setTimeout(() => { setEditingSessionId(s.id); setEditingTitle(s.title); }, 500); }}
+                                                                onTouchEnd={() => { if (longPressTimerRef.current) clearTimeout(longPressTimerRef.current); }}
+                                                                onTouchMove={() => { if (longPressTimerRef.current) clearTimeout(longPressTimerRef.current); }}
+                                                            >
+                                                                {s.title}
+                                                            </div>
+                                                        )}
                                                         {chLabel && <span style={{ fontSize: '9px', padding: '1px 4px', borderRadius: '3px', background: 'var(--bg-tertiary)', color: 'var(--text-tertiary)', flexShrink: 0 }}>{chLabel}</span>}
                                                     </div>
                                                     <div style={{ fontSize: '10px', color: 'var(--text-tertiary)', display: 'flex', alignItems: 'center', gap: '6px' }}>
@@ -3484,7 +3536,29 @@ function AgentDetailInner() {
                                         <div ref={chatContainerRef} onScroll={handleChatScroll} style={{ flex: 1, overflowY: 'auto', padding: '12px 16px' }}>
                                             {chatMessages.length === 0 && (
                                                 <div style={{ textAlign: 'center', padding: '60px 20px', color: 'var(--text-tertiary)' }}>
-                                                    <div style={{ fontSize: '13px', marginBottom: '4px' }}>{activeSession?.title || t('agent.chat.startChat')}</div>
+                                                    {activeSession && editingSessionId === activeSession.id ? (
+                                                        <input
+                                                            autoFocus
+                                                            value={editingTitle}
+                                                            onChange={e => setEditingTitle(e.target.value)}
+                                                            onKeyDown={e => {
+                                                                if (e.key === 'Enter') saveSessionTitle(activeSession.id, editingTitle);
+                                                                if (e.key === 'Escape') setEditingSessionId(null);
+                                                            }}
+                                                            onBlur={() => saveSessionTitle(activeSession.id, editingTitle)}
+                                                            style={{ fontSize: '13px', marginBottom: '4px', border: '1px solid var(--accent-primary)', borderRadius: '3px', padding: '1px 6px', outline: 'none', background: 'var(--bg-primary)', color: 'var(--text-primary)', width: '100%' }}
+                                                        />
+                                                    ) : (
+                                                        <div
+                                                            style={{ fontSize: '13px', marginBottom: '4px', cursor: activeSession ? 'text' : 'default' }}
+                                                            onDoubleClick={() => { if (activeSession) { setEditingSessionId(activeSession.id); setEditingTitle(activeSession.title); } }}
+                                                            onTouchStart={() => { if (activeSession) { longPressTimerRef.current = setTimeout(() => { setEditingSessionId(activeSession.id); setEditingTitle(activeSession.title); }, 500); } }}
+                                                            onTouchEnd={() => { if (longPressTimerRef.current) clearTimeout(longPressTimerRef.current); }}
+                                                            onTouchMove={() => { if (longPressTimerRef.current) clearTimeout(longPressTimerRef.current); }}
+                                                        >
+                                                            {activeSession?.title || t('agent.chat.startChat')}
+                                                        </div>
+                                                    )}
                                                     <div style={{ fontSize: '12px' }}>{t('agent.chat.startConversation', { name: agent.name })}</div>
                                                     <div style={{ fontSize: '11px', marginTop: '4px', opacity: 0.7 }}>{t('agent.chat.fileSupport')}</div>
                                                 </div>
