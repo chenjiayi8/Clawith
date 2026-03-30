@@ -397,7 +397,6 @@ async def get_session_messages(
         .order_by(ChatMessage.created_at.asc())
     )
     messages = msgs_result.scalars().all()
-    messages = [m for m in messages if not getattr(m, 'is_hidden', False)]
 
     # Reading your own first-party/channel session should clear its unread state.
     if str(session.user_id) == str(current_user.id) and not session.is_group and session.source_channel not in ("agent", "trigger"):
@@ -430,6 +429,8 @@ async def get_session_messages(
                 entry["toolThinking"] = data.get("reasoning_content", "")
             except Exception:
                 pass
+            if getattr(m, 'is_hidden', False):
+                entry["is_hidden"] = True
             if sender_name:
                 entry["sender_name"] = sender_name
             out.append(entry)
@@ -446,6 +447,8 @@ async def get_session_messages(
                 out.append(part)
         else:
             entry = {"id": str(m.id), "role": m.role, "content": m.content, "created_at": m.created_at.isoformat() if m.created_at else None}
+            if getattr(m, 'is_hidden', False):
+                entry["is_hidden"] = True
             if hasattr(m, 'thinking') and m.thinking:
                 entry["thinking"] = m.thinking
             if sender_name:
