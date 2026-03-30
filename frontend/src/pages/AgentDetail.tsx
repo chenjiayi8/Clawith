@@ -938,12 +938,21 @@ function AgentDetailInner() {
             if (activeSessionIdRef.current !== sess.id) return;
             const isAgentSession = sess.source_channel === 'agent' || sess.participant_type === 'agent';
             if (!isAgentSession && sess.user_id === String(currentUser?.id)) {
-                setChatMessages(msgs.map((m: any) => parseChatMsg({
-                    role: m.role, content: m.content,
-                    ...(m.toolName && { toolName: m.toolName, toolArgs: m.toolArgs, toolStatus: m.toolStatus, toolResult: m.toolResult }),
-                    ...(m.thinking && { thinking: m.thinking }),
-                    ...(m.created_at && { timestamp: m.created_at }),
-                })));
+                const processed: ChatMsg[] = [];
+                for (const m of msgs) {
+                    if (m.is_hidden) {
+                        const firstLine = (m.content || '').split('\n')[0].replace(/^#\s*/, '').replace(/^---$/, '').trim();
+                        processed.push({ role: 'assistant', content: firstLine || 'Skill loaded', isSkillIndicator: true, hiddenContent: m.content, id: m.id, timestamp: m.created_at });
+                        continue;
+                    }
+                    processed.push(parseChatMsg({
+                        role: m.role, content: m.content,
+                        ...(m.toolName && { toolName: m.toolName, toolArgs: m.toolArgs, toolStatus: m.toolStatus, toolResult: m.toolResult }),
+                        ...(m.thinking && { thinking: m.thinking }),
+                        ...(m.created_at && { timestamp: m.created_at }),
+                    }));
+                }
+                setChatMessages(processed);
             } else {
                 setHistoryMsgs(msgs);
             }
@@ -1034,8 +1043,9 @@ function AgentDetailInner() {
         } catch (e) { alert('Failed: ' + e); }
         setExpirySaving(false);
     };
-    interface ChatMsg { role: 'user' | 'assistant' | 'tool_call'; content: string; id?: string; fileName?: string; toolName?: string; toolArgs?: any; toolStatus?: 'running' | 'done'; toolResult?: string; thinking?: string; imageUrl?: string; timestamp?: string; isSkillIndicator?: boolean; }
+    interface ChatMsg { role: 'user' | 'assistant' | 'tool_call'; content: string; id?: string; fileName?: string; toolName?: string; toolArgs?: any; toolStatus?: 'running' | 'done'; toolResult?: string; thinking?: string; imageUrl?: string; timestamp?: string; isSkillIndicator?: boolean; hiddenContent?: string | null; }
     const [chatMessages, setChatMessages] = useState<ChatMsg[]>([]);
+    const [drawerContent, setDrawerContent] = useState<{ name: string; content: string } | null>(null);
     const [chatInput, setChatInput] = useState('');
     const [wsConnected, setWsConnected] = useState(false);
     const [uploading, setUploading] = useState(false);
@@ -1303,6 +1313,7 @@ function AgentDetailInner() {
                     role: 'assistant' as const,
                     content: `${d.emoji || ''} ${d.name} loaded`.trim(),
                     isSkillIndicator: true,
+                    hiddenContent: d.content || null,
                 }]);
             } else if (d.type === 'skill_error') {
                 setChatMessages(prev => [...prev, {
@@ -3576,7 +3587,7 @@ function AgentDetailInner() {
                                             {chatMessages.map((msg, i) => {
                                                 if (msg.isSkillIndicator) {
                                                     return (
-                                                        <div key={i} style={{ display: 'flex', justifyContent: 'center' }}>
+                                                        <div key={i} style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', gap: '6px' }}>
                                                             <div style={{
                                                                 display: 'inline-block',
                                                                 padding: '4px 12px',
@@ -3588,6 +3599,15 @@ function AgentDetailInner() {
                                                             }}>
                                                                 {msg.content}
                                                             </div>
+                                                            {msg.hiddenContent && (
+                                                                <button
+                                                                    onClick={() => setDrawerContent({ name: msg.content, content: msg.hiddenContent! })}
+                                                                    style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-tertiary, #666)', fontSize: '14px', padding: '2px 4px', borderRadius: '4px' }}
+                                                                    onMouseEnter={e => (e.currentTarget.style.color = 'var(--text-primary, #fff)')}
+                                                                    onMouseLeave={e => (e.currentTarget.style.color = 'var(--text-tertiary, #666)')}
+                                                                    title="View skill context"
+                                                                >👁</button>
+                                                            )}
                                                         </div>
                                                     );
                                                 }
@@ -4884,6 +4904,21 @@ function AgentDetailInner() {
                 )
             }
 
+        {/* Skill content drawer */}
+        {drawerContent && (
+            <>
+                <div onClick={() => setDrawerContent(null)} style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.3)', zIndex: 1000 }} />
+                <div style={{ position: 'fixed', top: 0, right: 0, bottom: 0, width: '40vw', minWidth: '320px', maxWidth: '600px', background: 'var(--bg-primary, #1a1a1a)', boxShadow: '-4px 0 20px rgba(0,0,0,0.15)', zIndex: 1001, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+                    <div style={{ padding: '16px 20px', borderBottom: '1px solid var(--border-color, #333)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                        <div style={{ fontSize: '14px', fontWeight: 600, color: 'var(--text-primary, #fff)' }}>{drawerContent.name}</div>
+                        <button onClick={() => setDrawerContent(null)} style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: '18px', color: 'var(--text-tertiary, #666)', padding: '4px' }}>✕</button>
+                    </div>
+                    <div style={{ flex: 1, overflow: 'auto', padding: '20px' }}>
+                        <pre style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-word', fontSize: '12px', lineHeight: '1.6', color: 'var(--text-secondary, #aaa)', fontFamily: 'var(--font-mono, monospace)', margin: 0 }}>{drawerContent.content}</pre>
+                    </div>
+                </div>
+            </>
+        )}
         </>
     );
 }
