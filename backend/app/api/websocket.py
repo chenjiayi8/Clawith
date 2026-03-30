@@ -70,7 +70,7 @@ async def _inject_skill_if_matched(content, agent_id, user_id, conv_id, db, conv
     skill_content, display_name, emoji = await _resolve_skill_content(skill_key, agent_id)
     if skill_content:
         await _persist_and_inject_skill(skill_content, agent_id, user_id, conv_id, db, conversation, websocket)
-        await websocket.send_json({"type": "skill_loaded", "name": display_name, "emoji": emoji or ""})
+        await websocket.send_json({"type": "skill_loaded", "name": display_name, "emoji": emoji or "", "content": skill_content})
     elif ":" in skill_key:
         # Explicit colon path that doesn't resolve — send error
         await websocket.send_json({"type": "skill_error", "message": f"Skill '{skill_key}' not found"})
@@ -510,6 +510,7 @@ async def websocket_chat(
                 await websocket.send_json({"type": "error", "content": "This Agent has expired and is off duty. Please contact your admin to extend its service."})
                 await websocket.close(code=4003)
                 return
+            _tenant_id = user.tenant_id  # Capture for title generation
             agent_name = agent.name
             agent_type = agent.agent_type or ""
             role_description = agent.role_description or ""
@@ -1057,6 +1058,40 @@ async def websocket_chat(
                 "message_id": str(asst_msg.id),
             })
             logger.info("[WS] Response done sent to client")
+
+            # ── Auto-generate session title on first exchange ──
+            if not history_messages and _tenant_id:
+                try:
+                    from app.models.tenant import Tenant as _Tenant
+                    from app.models.llm import LLMModel as _LLM
+                    import asyncio as _asyncio
+                    async with async_session() as _tdb:
+                        _t_r = await _tdb.execute(
+                            select(_Tenant).where(_Tenant.id == _tenant_id)
+                        )
+                        _tenant = _t_r.scalar_one_or_none()
+                        if _tenant and _tenant.utility_model_id:
+                            _m_r = await _tdb.execute(
+                                select(_LLM).where(_LLM.id == _tenant.utility_model_id)
+                            )
+                            _util_model = _m_r.scalar_one_or_none()
+                            if _util_model:
+                                from app.services.session_title import generate_session_title
+                                _first_user_msg = display_content if display_content else content
+                                _asyncio.create_task(
+                                    generate_session_title(
+                                        session_id=conv_id,
+                                        user_message=_first_user_msg,
+                                        assistant_response=assistant_response[:500],
+                                        provider=_util_model.provider,
+                                        api_key=_util_model.api_key,
+                                        model_name=_util_model.model,
+                                        base_url=_util_model.base_url,
+                                        websocket=websocket,
+                                    )
+                                )
+                except Exception as _e:
+                    logger.warning(f"[WS] Title generation trigger failed: {_e}")
 
     except WebSocketDisconnect:
         logger.info(f"[WS] Client disconnected: {agent_name}")
