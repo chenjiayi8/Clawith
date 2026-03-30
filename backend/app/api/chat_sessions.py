@@ -303,7 +303,6 @@ async def get_session_messages(
         .limit(500)
     )
     messages = msgs_result.scalars().all()
-    messages = [m for m in messages if not getattr(m, 'is_hidden', False)]
 
     # Resolve sender names for agent sessions
     sender_cache: dict = {}
@@ -330,6 +329,8 @@ async def get_session_messages(
                 entry["toolResult"] = data.get("result", "")
             except Exception:
                 pass
+            if getattr(m, 'is_hidden', False):
+                entry["is_hidden"] = True
             if sender_name:
                 entry["sender_name"] = sender_name
             out.append(entry)
@@ -346,6 +347,8 @@ async def get_session_messages(
                 out.append(part)
         else:
             entry = {"id": str(m.id), "role": m.role, "content": m.content, "created_at": m.created_at.isoformat() if m.created_at else None}
+            if getattr(m, 'is_hidden', False):
+                entry["is_hidden"] = True
             if hasattr(m, 'thinking') and m.thinking:
                 entry["thinking"] = m.thinking
             if sender_name:
