@@ -1019,10 +1019,14 @@ export default function EnterpriseSettings() {
     });
     const [quotaSaving, setQuotaSaving] = useState(false);
     const [quotaSaved, setQuotaSaved] = useState(false);
+    const [utilityModelId, setUtilityModelId] = useState<string>('');
     useEffect(() => {
-        if (activeTab === 'quotas') {
+        if (activeTab === 'quotas' || activeTab === 'llm') {
             fetchJson<any>('/enterprise/tenant-quotas').then(d => {
-                if (d && Object.keys(d).length) setQuotaForm(f => ({ ...f, ...d }));
+                if (d && Object.keys(d).length) {
+                    setQuotaForm(f => ({ ...f, ...d }));
+                    setUtilityModelId(d.utility_model_id || '');
+                }
             }).catch(() => { });
         }
     }, [activeTab]);
@@ -1246,6 +1250,42 @@ export default function EnterpriseSettings() {
                 {/* ── LLM Model Pool ── */}
                 {activeTab === 'llm' && (
                     <div>
+                        {/* Utility Model Selection */}
+                        <div style={{ marginBottom: '20px', padding: '16px', background: 'var(--bg-secondary)', borderRadius: '8px' }}>
+                            <div style={{ fontSize: '13px', fontWeight: 600, marginBottom: '8px', color: 'var(--text-primary)' }}>
+                                {t('enterprise.llm.utilityModel')}
+                            </div>
+                            <div style={{ fontSize: '11px', color: 'var(--text-tertiary)', marginBottom: '10px' }}>
+                                {t('enterprise.llm.utilityModelDesc')}
+                            </div>
+                            <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+                                <select
+                                    value={utilityModelId}
+                                    onChange={async (e) => {
+                                        const val = e.target.value;
+                                        setUtilityModelId(val);
+                                        try {
+                                            await fetchJson('/enterprise/tenant-quotas', {
+                                                method: 'PATCH',
+                                                body: JSON.stringify({ utility_model_id: val || '' }),
+                                            });
+                                        } catch (err) {
+                                            console.error('Failed to update utility model:', err);
+                                        }
+                                    }}
+                                    style={{
+                                        padding: '6px 10px', borderRadius: '6px', border: '1px solid var(--border-color)',
+                                        background: 'var(--bg-primary)', color: 'var(--text-primary)', fontSize: '12px',
+                                        minWidth: '200px',
+                                    }}
+                                >
+                                    <option value="">{t('enterprise.llm.noUtilityModel')}</option>
+                                    {(models || []).filter((m: any) => m.is_enabled !== false).map((m: any) => (
+                                        <option key={m.id} value={m.id}>{m.label || `${m.provider}/${m.model}`}</option>
+                                    ))}
+                                </select>
+                            </div>
+                        </div>
                         <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: '16px' }}>
                             <button className="btn btn-primary" onClick={() => {
                                 setEditingModelId(null);
