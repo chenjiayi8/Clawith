@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useTranslation } from 'react-i18next';
 import { IconEdit } from '@tabler/icons-react';
@@ -62,6 +62,7 @@ export default function LlmTab({ selectedTenantId }: LlmTabProps) {
     const currentUser = useAuthStore((s) => s.user);
     const [showAddModel, setShowAddModel] = useState(false);
     const [editingModelId, setEditingModelId] = useState<string | null>(null);
+    const [utilityModelId, setUtilityModelId] = useState<string>('');
     const [modelForm, setModelForm] = useState({
         provider: 'anthropic',
         model: '',
@@ -91,6 +92,13 @@ export default function LlmTab({ selectedTenantId }: LlmTabProps) {
         queryFn: () => fetchJson<LLMProviderSpec[]>('/enterprise/llm-providers'),
     });
     const providerOptions = providerSpecs.length > 0 ? providerSpecs : FALLBACK_LLM_PROVIDERS;
+
+
+    useEffect(() => {
+        fetchJson<any>('/enterprise/tenant-quotas')
+            .then((d) => setUtilityModelId(d?.utility_model_id || ''))
+            .catch(() => {});
+    }, [selectedTenantId]);
 
     const addModel = useMutation({
         mutationFn: (data: any) => fetchJson(`/enterprise/llm-models${selectedTenantId ? `?tenant_id=${selectedTenantId}` : ''}`, { method: 'POST', body: JSON.stringify(data) }),
@@ -232,6 +240,41 @@ export default function LlmTab({ selectedTenantId }: LlmTabProps) {
 
     return (
         <div>
+            <div style={{ marginBottom: '20px', padding: '16px', background: 'var(--bg-secondary)', borderRadius: '8px' }}>
+                <div style={{ fontSize: '13px', fontWeight: 600, marginBottom: '8px', color: 'var(--text-primary)' }}>
+                    {t('enterprise.llm.utilityModel')}
+                </div>
+                <div style={{ fontSize: '11px', color: 'var(--text-tertiary)', marginBottom: '10px' }}>
+                    {t('enterprise.llm.utilityModelDesc')}
+                </div>
+                <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+                    <select
+                        value={utilityModelId}
+                        onChange={async (e) => {
+                            const val = e.target.value;
+                            setUtilityModelId(val);
+                            try {
+                                await fetchJson('/enterprise/tenant-quotas', {
+                                    method: 'PATCH',
+                                    body: JSON.stringify({ utility_model_id: val || '' }),
+                                });
+                            } catch (err) {
+                                console.error('Failed to update utility model:', err);
+                            }
+                        }}
+                        style={{
+                            padding: '6px 10px', borderRadius: '6px', border: '1px solid var(--border-color)',
+                            background: 'var(--bg-primary)', color: 'var(--text-primary)', fontSize: '12px',
+                            minWidth: '200px',
+                        }}
+                    >
+                        <option value="">{t('enterprise.llm.noUtilityModel')}</option>
+                        {(models || []).filter((m: any) => m.is_enabled !== false && m.enabled !== false).map((m: any) => (
+                            <option key={m.id} value={m.id}>{m.label || `${m.provider}/${m.model}`}</option>
+                        ))}
+                    </select>
+                </div>
+            </div>
             <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: '16px' }}>
                 <button className="btn btn-primary" onClick={openCreateForm}>+ {t('enterprise.llm.addModel')}</button>
             </div>
