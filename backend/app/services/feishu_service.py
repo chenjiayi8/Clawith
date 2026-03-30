@@ -493,6 +493,31 @@ class FeishuService:
             )
             return resp.json()
 
+    async def bitable_create_app(self, app_id: str, app_secret: str, name: str, folder_token: str = "") -> dict:
+        """Create a new Bitable (多维表格) app in the given Drive folder.
+
+        Uses the Drive v1 files API with type='bitable'.
+        If folder_token is empty, the file is created in the root 'My Drive'.
+
+        Args:
+            name:         The display name of the new Bitable.
+            folder_token: Parent folder token (optional). Leave empty for root.
+        Returns:
+            API response dict containing 'data.file.token' as the new app_token.
+        """
+        tenant_token = await self.get_tenant_access_token(app_id, app_secret)
+        body: dict = {"name": name, "type": "bitable"}
+        if folder_token:
+            body["folder_token"] = folder_token
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.post(
+                "https://open.feishu.cn/open-apis/drive/v1/files",
+                json=body,
+                headers={"Authorization": f"Bearer {tenant_token}"},
+            )
+            return resp.json()
+
+
     # --- Docs API ---
     async def read_feishu_doc(self, app_id: str, app_secret: str, document_id: str) -> dict:
         """Get pure text content of a new-version Feishu Doc (docx)."""

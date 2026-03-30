@@ -1324,6 +1324,7 @@ _CHANNEL_MESSAGE_TOOL_NAMES = {
 _FEISHU_TOOL_NAMES = {
     "send_feishu_message",
     "feishu_user_search",
+    "bitable_create_app",
     "bitable_list_tables",
     "bitable_list_fields",
     "bitable_query_records",
@@ -1706,6 +1707,8 @@ async def execute_tool(
         elif tool_name == "import_mcp_server":
             result = await _import_mcp_server(agent_id, arguments)
         # ── Feishu Bitable Tools ──
+        elif tool_name == "bitable_create_app":
+            result = await _bitable_create_app(agent_id, arguments)
         elif tool_name == "bitable_list_tables":
             result = await _bitable_list_tables(agent_id, arguments)
         elif tool_name == "bitable_list_fields":
@@ -5189,6 +5192,51 @@ async def _bitable_list_tables(agent_id: uuid.UUID, arguments: dict) -> str:
         return "OK: Tables in this Bitable:\n" + "\n".join(lines) + f"\n\n🔗 多维表格链接: {bitable_url}"
     except Exception as e:
         return f"Failed: {str(e)[:300]}"
+
+
+async def _bitable_create_app(agent_id: uuid.UUID, arguments: dict) -> str:
+    """Create a new Feishu Bitable (多维表格) app in the user's Drive.
+
+    Calls the Drive v1 files API with type='bitable'.
+    Resolves the tenant domain to return a user-accessible URL.
+    """
+    name = arguments.get("name", "").strip()
+    if not name:
+        return "Failed: Missing required argument 'name' — please provide a name for the new Bitable."
+
+    folder_token = arguments.get("folder_token", "").strip()
+
+    app_id, app_secret = await _get_feishu_credentials(agent_id)
+    if not app_id or not app_secret:
+        return "Failed: Feishu app credentials not configured for this agent."
+
+    from app.services.feishu_service import feishu_service
+    try:
+        resp = await feishu_service.bitable_create_app(app_id, app_secret, name, folder_token)
+        err = _check_feishu_err(resp)
+        if err:
+            return err
+
+        # The Drive API returns the new file info under data.file (or data.token in some versions)
+        file_info = resp.get("data", {}).get("file", {}) or resp.get("data", {})
+        app_token = file_info.get("token", "") or file_info.get("app_token", "")
+        if not app_token:
+            return f"Failed: Bitable created but could not extract app_token from response: {resp}"
+
+        # Build a user-accessible URL with the tenant's real domain
+        tenant_token = await feishu_service.get_tenant_access_token(app_id, app_secret)
+        bitable_url = await _get_feishu_bitable_url(tenant_token, app_token)
+
+        return (
+            f"✅ 多维表格创建成功！\n"
+            f"名称：{name}\n"
+            f"App Token：{app_token}\n"
+            f"🔗 访问链接：{bitable_url}\n"
+            f"下一步：可以调用 bitable_list_tables(url='{bitable_url}') 查看初始数据表。"
+        )
+    except Exception as e:
+        return f"Failed: {str(e)[:300]}"
+
 
 async def _bitable_list_fields(agent_id: uuid.UUID, arguments: dict) -> str:
     """List all fields (columns) in a specific Bitable table."""

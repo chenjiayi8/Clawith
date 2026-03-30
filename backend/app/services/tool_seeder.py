@@ -785,6 +785,24 @@ BUILTIN_TOOLS = [
         "config_schema": {},
     },
     {
+        "name": "bitable_create_app",
+        "display_name": "Bitable Create",
+        "description": "在飞书云盘中新建一个多维表格（Bitable）应用。创建后返回可直接访问的链接和 App Token，下一步可以通过 bitable_list_tables 查看初始数据表。",
+        "category": "feishu",
+        "icon": "📊",
+        "is_default": False,
+        "parameters_schema": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "新多维表格的名称，例如「项目追踪表」"},
+                "folder_token": {"type": "string", "description": "可选：父文件夹的 folder_token。不填则创建到「我的空间」根目录。"},
+            },
+            "required": ["name"],
+        },
+        "config": {},
+        "config_schema": {},
+    },
+    {
         "name": "bitable_list_tables",
         "display_name": "Bitable List Tables",
         "description": "列出飞书多维表格内的所有数据表 (Tables)。url 支持表格链接或 Wiki 链接。使用此工具了解请求的多维表格中有哪些表。",
