@@ -1040,7 +1040,6 @@ export default function Layout() {
                         }} title={isSidebarCollapsed ? t('common.expandSidebar') : t('common.collapseSidebar')}>
                             {isSidebarCollapsed ? SidebarIcons.expand : SidebarIcons.collapse}
                         </button>
-
                     </div>
 
 
@@ -1365,6 +1364,10 @@ export default function Layout() {
             )}
 
             <main className={`main-content${isChatPage ? ' chat-page' : ''}${isAgentSettingsPage ? ' agent-settings-page' : ''}`}>
+                <div className="mobile-top-bar">
+                    <img src={theme === 'dark' ? (import.meta.env.VITE_APP_LOGO_DARK || '/logo-white.png') : (import.meta.env.VITE_APP_LOGO_LIGHT || '/logo-black.png')} alt="" />
+                    <span>{import.meta.env.VITE_APP_NAME || 'Clawith'}</span>
+                </div>
                 <Outlet context={{ openTalentMarket: () => setShowTalentMarket(true) }} />
             </main>
 

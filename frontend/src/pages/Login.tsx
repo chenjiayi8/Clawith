@@ -407,8 +407,8 @@ export default function Login() {
             <div className="login-hero">
                 <div className="login-hero-bg" />
                 <div className="login-hero-mark" aria-hidden="true">
-                    <img src="/logo-black.png" className="login-hero-mark-logo" alt="" />
-                    <span>Clawith</span>
+                    <img src={import.meta.env.VITE_APP_LOGO_LIGHT || '/logo-black.png'} className="login-hero-mark-logo" alt="" />
+                    <span>{import.meta.env.VITE_APP_NAME || 'Clawith'}</span>
                     <span className="login-hero-mark-divider" />
                     <span>{t('login.hero.mark')}</span>
                 </div>
@@ -444,6 +444,7 @@ export default function Login() {
                     ) : (
                     <>
                     <div className="login-form-header">
+                        <div className="login-form-logo"><img src={import.meta.env.VITE_APP_LOGO_LIGHT || '/logo-black.png'} className="login-logo-img" alt="" style={{ width: 28, height: 28, marginRight: 8, verticalAlign: 'middle' }} />{import.meta.env.VITE_APP_NAME || 'Clawith'}</div>
                         <h2 className="login-form-title">
                             {showVerification
                                 ? (isZh ? '验证邮箱' : 'Verify email')
