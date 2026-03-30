@@ -345,6 +345,7 @@ async def websocket_chat(
                 await websocket.send_json({"type": "error", "content": "This Agent has expired and is off duty. Please contact your admin to extend its service."})
                 await websocket.close(code=4003)
                 return
+            _tenant_id = user.tenant_id  # Capture for title generation
             agent_name = agent.name
             agent_type = agent.agent_type or ""
             role_description = agent.role_description or ""
