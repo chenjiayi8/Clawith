@@ -55,3 +55,4 @@ class ChatSession(Base):
     last_read_at_by_user: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
     last_message_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    title_edited: Mapped[bool] = mapped_column(Boolean, server_default="false", nullable=False)

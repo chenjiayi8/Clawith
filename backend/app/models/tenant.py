@@ -62,6 +62,9 @@ class Tenant(Base):
     default_model_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("llm_models.id", ondelete="SET NULL"), nullable=True,
     )
+    utility_model_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("llm_models.id", ondelete="SET NULL"), nullable=True
+    )
 
     @property
     def logo_url(self) -> str | None:
