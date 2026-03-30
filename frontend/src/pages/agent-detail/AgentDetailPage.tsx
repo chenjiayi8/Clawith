@@ -2170,6 +2170,7 @@ export default function AgentDetailPage() {
     const [editingSessionId, setEditingSessionId] = useState<string | null>(null);
     const [editingTitle, setEditingTitle] = useState('');
     const longPressTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+    const sessionClickTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const editingSessionIdRef = useRef<string | null>(null);
     const currentAgentIdRef = useRef<string | undefined>(id);
     const sessionMsgAbortRef = useRef<AbortController | null>(null);
@@ -5810,7 +5811,7 @@ export default function AgentDetailPage() {
                                                     };
                                                     const chLabel = channelLabel[s.source_channel];
                                                     return (
-                                                        <div key={s.id} onClick={() => { setChatScope('mine'); selectSession(s, 'mine'); }}
+                                                        <div key={s.id} onClick={() => { if (sessionClickTimerRef.current) clearTimeout(sessionClickTimerRef.current); sessionClickTimerRef.current = setTimeout(() => { setChatScope('mine'); selectSession(s, 'mine'); }, 250); }}
                                                             className="session-item"
                                                             style={{ padding: '8px 12px', cursor: 'pointer', borderLeft: isActive ? '2px solid var(--accent-primary)' : '2px solid transparent', background: isActive ? 'var(--bg-secondary)' : 'transparent', marginBottom: '1px', display: 'flex', alignItems: 'center', gap: '4px' }}
                                                             onMouseEnter={e => { if (!isActive) e.currentTarget.style.background = 'var(--bg-secondary)'; }}
@@ -5833,7 +5834,7 @@ export default function AgentDetailPage() {
                                                                     ) : (
                                                                         <div
                                                                             style={{ fontSize: '12px', fontWeight: isActive ? 600 : 400, color: 'var(--text-primary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1, minWidth: 0 }}
-                                                                            onDoubleClick={(e) => { e.stopPropagation(); setEditingSessionId(s.id); setEditingTitle(s.title); }}
+                                                                            onDoubleClick={(e) => { e.stopPropagation(); if (sessionClickTimerRef.current) clearTimeout(sessionClickTimerRef.current); setEditingSessionId(s.id); setEditingTitle(s.title); }}
                                                                             onTouchStart={() => { longPressTimerRef.current = setTimeout(() => { setEditingSessionId(s.id); setEditingTitle(s.title); }, 500); }}
                                                                             onTouchEnd={() => { if (longPressTimerRef.current) clearTimeout(longPressTimerRef.current); }}
                                                                             onTouchMove={() => { if (longPressTimerRef.current) clearTimeout(longPressTimerRef.current); }}
