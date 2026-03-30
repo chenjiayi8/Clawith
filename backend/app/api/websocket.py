@@ -1203,6 +1203,37 @@ async def websocket_chat(
             })
             logger.info("[WS] Response done sent to client")
 
+            # ── Auto-generate session title on first exchange ──
+            if not history_messages and _tenant_id:
+                try:
+                    from app.models.tenant import Tenant as _Tenant
+                    from app.models.llm import LLMModel as _LLM
+                    import asyncio as _asyncio
+                    async with async_session() as _tdb:
+                        _t_r = await _tdb.execute(
+                            select(_Tenant).where(_Tenant.id == _tenant_id)
+                        )
+                        _tenant = _t_r.scalar_one_or_none()
+                        if _tenant and _tenant.utility_model_id:
+                            _m_r = await _tdb.execute(
+                                select(_LLM).where(_LLM.id == _tenant.utility_model_id)
+                            )
+                            _util_model = _m_r.scalar_one_or_none()
+                            if _util_model:
+                                from app.services.session_title import generate_session_title
+                                _first_user_msg = display_content if display_content else content
+                                _asyncio.create_task(
+                                    generate_session_title(
+                                        session_id=conv_id,
+                                        user_message=_first_user_msg,
+                                        assistant_response=assistant_response[:500],
+                                        utility_model=_util_model,
+                                        websocket=websocket,
+                                    )
+                                )
+                except Exception as _e:
+                    logger.warning(f"[WS] Title generation trigger failed: {_e}")
+
             # Re-process any queued messages (if user sent something during generation)
             for qm in queued_messages:
                 # In a real implementation, you might want to push these back to the main loop
