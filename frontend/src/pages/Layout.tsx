@@ -336,8 +336,8 @@ export default function Layout() {
             <nav className={`sidebar ${isSidebarCollapsed ? 'collapsed' : ''}${isMobileMenuOpen ? ' mobile-open' : ''}`}>
                 <div className="sidebar-top">
                     <div className="sidebar-logo">
-                        <img src={theme === 'dark' ? '/logo-white.png' : '/logo-black.png'} alt="" style={{ width: 22, height: 22 }} />
-                        <span className="sidebar-logo-text">Clawith</span>
+                        <img src={theme === 'dark' ? (import.meta.env.VITE_APP_LOGO_DARK || '/logo-white.png') : (import.meta.env.VITE_APP_LOGO_LIGHT || '/logo-black.png')} alt="" style={{ width: 22, height: 22 }} />
+                        <span className="sidebar-logo-text">{import.meta.env.VITE_APP_NAME || 'Clawith'}</span>
                     </div>
 
 
@@ -666,8 +666,8 @@ export default function Layout() {
             <main className="main-content">
                 {/* Mobile top bar */}
                 <div className="mobile-top-bar">
-                    <img src={theme === 'dark' ? '/logo-white.png' : '/logo-black.png'} alt="" />
-                    <span>Clawith</span>
+                    <img src={theme === 'dark' ? (import.meta.env.VITE_APP_LOGO_DARK || '/logo-white.png') : (import.meta.env.VITE_APP_LOGO_LIGHT || '/logo-black.png')} alt="" />
+                    <span>{import.meta.env.VITE_APP_NAME || 'Clawith'}</span>
                 </div>
                 <Outlet />
             </main>
