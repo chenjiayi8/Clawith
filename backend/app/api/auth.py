@@ -114,7 +114,6 @@ async def _send_verification_email_task(
             user.display_name or identity.username or "User",
             raw_code,
             expiry_minutes,
-            tenant_id=user.tenant_id,
         )
     except Exception as exc:
         logger.error(f"Failed to create verification token for {user.email}: {exc}")
@@ -326,38 +325,10 @@ async def _handle_normal_register(data: UserRegister, background_tasks: Backgrou
     identity = ident_res.scalar_one_or_none()
 
     if identity:
-        # Check if they already have a record in this specific tenant
-        user_query = select(User).where(
-            User.identity_id == identity.id,
-            User.tenant_id == tenant_uuid
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Email already registered, please login directly."
         )
-        user_res = await db.execute(user_query)
-        existing_user = user_res.scalar_one_or_none()
-
-        if existing_user:
-            if not identity.email_verified:
-                # Verify password
-                if not identity.password_hash or not verify_password(data.password, identity.password_hash):
-                    raise HTTPException(
-                        status_code=status.HTTP_401_UNAUTHORIZED,
-                        detail="Email already registered. Incorrect password."
-                    )
-                
-                await _send_verification_email_task(existing_user, background_tasks, settings, db)
-
-                # Return token for company selection/verification flow
-                token = create_access_token(str(existing_user.id), existing_user.role)
-                
-                return RegisterInitResponse(
-                    user_id=existing_user.id,
-                    email=identity.email,
-                    access_token=token,
-                    user=UserOut.model_validate(existing_user),
-                    message="Email already registered but not verified. Verification code resent.",
-                    needs_company_setup=existing_user.tenant_id is None,
-                )
-            else:
-                raise HTTPException(status_code=409, detail="Email already registered in this organization")
     
     # 2. Uniqueness Check (Already handled by Identity lookup above, but let's be explicit for Phone if needed)
     # conflicts = await registration_service.check_duplicate_identity(db, email=data.email)
@@ -539,6 +510,45 @@ async def login(data: UserLogin, background_tasks: BackgroundTasks, db: AsyncSes
     )
 
 
+@router.get("/email-hint")
+async def get_email_hint(username: str, db: AsyncSession = Depends(get_db)):
+    """Return a hinted email address for a given username."""
+    from app.models.user import Identity
+    result = await db.execute(select(Identity).where(Identity.username == username))
+    identity = result.scalar_one_or_none()
+    
+    if not identity or not identity.email:
+        raise HTTPException(status_code=404, detail="Account not found.")
+        
+    email = identity.email
+    parts = email.split("@")
+    if len(parts) == 2:
+        name, domain = parts
+        
+        # Obfuscate name
+        if len(name) <= 2:
+            obs_name = name[0] + "***"
+        else:
+            obs_name = name[:2] + "***" + name[-1]
+            
+        # Obfuscate domain
+        domain_parts = domain.split(".")
+        if len(domain_parts) >= 2:
+            d_name = domain_parts[0]
+            d_ext = ".".join(domain_parts[1:])
+            if len(d_name) <= 2:
+                obs_domain = d_name[0] + "***." + d_ext
+            else:
+                obs_domain = d_name[0] + "***" + d_name[-1] + "." + d_ext
+            hint = f"{obs_name}@{obs_domain}"
+        else:
+            hint = f"{obs_name}@{domain}"
+    else:
+        hint = email[:3] + "***"
+        
+    return {"hint": hint}
+
+
 @router.post("/forgot-password")
 async def forgot_password(
     data: ForgotPasswordRequest,
@@ -578,18 +588,12 @@ async def forgot_password(
 
         reset_url = await build_password_reset_url(db, raw_token)
         expiry_minutes = int((expires_at - datetime.now(timezone.utc)).total_seconds() // 60)
-        
-        # Get a representative user/tenant for context
-        user_result = await db.execute(select(User).where(User.identity_id == identity.id).limit(1))
-        user = user_result.scalar_one_or_none()
-
         background_tasks.add_task(
             send_password_reset_email,
             identity.email,
-            identity.display_name or identity.username or "User",
+            identity.username or "User",
             reset_url,
             expiry_minutes,
-            tenant_id=user.tenant_id if user else None,
         )
     except Exception as exc:
         logger.warning(f"Failed to process password reset email for {data.email}: {exc}")

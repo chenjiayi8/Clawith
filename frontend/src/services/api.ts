@@ -164,6 +164,9 @@ export const authApi = {
     resetPassword: (data: { token: string; new_password: string }) =>
         request<{ ok: boolean }>('/auth/reset-password', { method: 'POST', body: JSON.stringify(data) }),
 
+    emailHint: (username: string) =>
+        request<{ hint: string }>(`/auth/email-hint?username=${encodeURIComponent(username)}`),
+
     me: () => request<User>('/auth/me'),
 
     updateMe: (data: Partial<User>) =>

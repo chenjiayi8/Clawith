@@ -115,6 +115,20 @@ function PlatformTab() {
     const [urlSaving, setUrlSaving] = useState(false);
     const [urlSaved, setUrlSaved] = useState(false);
 
+    // System email configuration
+    const [systemEmailConfig, setSystemEmailConfig] = useState({
+        SYSTEM_EMAIL_FROM_ADDRESS: '',
+        SYSTEM_EMAIL_FROM_NAME: 'Clawith',
+        SYSTEM_SMTP_HOST: '',
+        SYSTEM_SMTP_PORT: 465,
+        SYSTEM_SMTP_USERNAME: '',
+        SYSTEM_SMTP_PASSWORD: '',
+        SYSTEM_SMTP_SSL: true,
+        SYSTEM_SMTP_TIMEOUT_SECONDS: 15,
+    });
+    const [emailConfigSaving, setEmailConfigSaving] = useState(false);
+    const [emailConfigSaved, setEmailConfigSaved] = useState(false);
+
     // Toast
     const [toast, setToast] = useState<{ msg: string; type: 'success' | 'error' } | null>(null);
     const showToast = (msg: string, type: 'success' | 'error' = 'success') => {
@@ -145,6 +159,24 @@ function PlatformTab() {
             }).catch(() => {
                 // API failed, keep initial value (window.location.origin) as suggestion
             });
+            
+        // Load System Email
+        fetchJson<any>('/enterprise/system-settings/system_email_platform')
+            .then(d => {
+                if (d?.value) {
+                    setSystemEmailConfig({
+                        SYSTEM_EMAIL_FROM_ADDRESS: d.value.SYSTEM_EMAIL_FROM_ADDRESS || '',
+                        SYSTEM_EMAIL_FROM_NAME: d.value.SYSTEM_EMAIL_FROM_NAME || 'Clawith',
+                        SYSTEM_SMTP_HOST: d.value.SYSTEM_SMTP_HOST || '',
+                        SYSTEM_SMTP_PORT: d.value.SYSTEM_SMTP_PORT || 465,
+                        SYSTEM_SMTP_USERNAME: d.value.SYSTEM_SMTP_USERNAME || '',
+                        SYSTEM_SMTP_PASSWORD: d.value.SYSTEM_SMTP_PASSWORD || '',
+                        SYSTEM_SMTP_SSL: d.value.SYSTEM_SMTP_SSL !== undefined ? d.value.SYSTEM_SMTP_SSL : true,
+                        SYSTEM_SMTP_TIMEOUT_SECONDS: d.value.SYSTEM_SMTP_TIMEOUT_SECONDS || 15,
+                    });
+                }
+            })
+            .catch(() => { });
     }, []);
 
     const handleToggleSetting = async (key: string, value: boolean) => {
@@ -187,6 +219,23 @@ function PlatformTab() {
             showToast('Failed to save', 'error');
         }
         setUrlSaving(false);
+    };
+
+    const saveEmailConfig = async () => {
+        setEmailConfigSaving(true);
+        try {
+            await fetchJson('/enterprise/system-settings/system_email_platform', {
+                method: 'PUT',
+                body: JSON.stringify({ value: systemEmailConfig }),
+            });
+            setEmailConfigSaved(true);
+            setTimeout(() => setEmailConfigSaved(false), 2000);
+            showToast('Email config saved');
+        } catch (e: any) {
+            showToast('Failed to save email config: ' + (e.message || 'Unknown error'), 'error');
+        } finally {
+            setEmailConfigSaving(false);
+        }
     };
 
     const switchStyle = (checked: boolean, disabled?: boolean): React.CSSProperties => ({
@@ -303,6 +352,127 @@ function PlatformTab() {
                         {urlSaving ? t('common.loading') : t('common.save', 'Save')}
                     </button>
                     {urlSaved && <span style={{ color: 'var(--success)', fontSize: '12px' }}>{t('enterprise.config.saved', 'Saved')}</span>}
+                </div>
+            </div>
+
+            {/* System Email Configuration */}
+            <div className="card" style={{ padding: '16px', marginBottom: '16px' }}>
+                <div style={{ fontSize: '13px', fontWeight: 600, marginBottom: '4px', color: 'var(--text-secondary)' }}>
+                    {t('enterprise.systemEmail.title', 'System Email Configuration')}
+                </div>
+                <p style={{ fontSize: '12px', color: 'var(--text-tertiary)', marginBottom: '16px' }}>
+                    {t('enterprise.systemEmail.description', 'Configure SMTP settings for sending system emails such as password resets and notifications.')}
+                </p>
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px' }}>
+                    <div>
+                        <label className="form-label" style={{ fontSize: '12px', marginBottom: '6px' }}>
+                            {t('enterprise.systemEmail.fromAddress', 'From Email Address')}
+                        </label>
+                        <input
+                            className="form-input"
+                            value={systemEmailConfig.SYSTEM_EMAIL_FROM_ADDRESS}
+                            onChange={e => setSystemEmailConfig({ ...systemEmailConfig, SYSTEM_EMAIL_FROM_ADDRESS: e.target.value })}
+                            placeholder="noreply@yourcompany.com"
+                            style={{ fontSize: '13px' }}
+                        />
+                    </div>
+                    <div>
+                        <label className="form-label" style={{ fontSize: '12px', marginBottom: '6px' }}>
+                            {t('enterprise.systemEmail.fromName', 'From Name')}
+                        </label>
+                        <input
+                            className="form-input"
+                            value={systemEmailConfig.SYSTEM_EMAIL_FROM_NAME}
+                            onChange={e => setSystemEmailConfig({ ...systemEmailConfig, SYSTEM_EMAIL_FROM_NAME: e.target.value })}
+                            placeholder="Clawith"
+                            style={{ fontSize: '13px' }}
+                        />
+                    </div>
+                    <div>
+                        <label className="form-label" style={{ fontSize: '12px', marginBottom: '6px' }}>
+                            {t('enterprise.systemEmail.smtpHost', 'SMTP Host')}
+                        </label>
+                        <input
+                            className="form-input"
+                            value={systemEmailConfig.SYSTEM_SMTP_HOST}
+                            onChange={e => setSystemEmailConfig({ ...systemEmailConfig, SYSTEM_SMTP_HOST: e.target.value })}
+                            placeholder="smtp.gmail.com"
+                            style={{ fontSize: '13px' }}
+                        />
+                    </div>
+                    <div>
+                        <label className="form-label" style={{ fontSize: '12px', marginBottom: '6px' }}>
+                            {t('enterprise.systemEmail.smtpPort', 'SMTP Port')}
+                        </label>
+                        <input
+                            className="form-input"
+                            type="number"
+                            value={systemEmailConfig.SYSTEM_SMTP_PORT}
+                            onChange={e => setSystemEmailConfig({ ...systemEmailConfig, SYSTEM_SMTP_PORT: parseInt(e.target.value) || 465 })}
+                            placeholder="465"
+                            style={{ fontSize: '13px' }}
+                        />
+                    </div>
+                    <div>
+                        <label className="form-label" style={{ fontSize: '12px', marginBottom: '6px' }}>
+                            {t('enterprise.systemEmail.username', 'SMTP Username')}
+                        </label>
+                        <input
+                            className="form-input"
+                            value={systemEmailConfig.SYSTEM_SMTP_USERNAME}
+                            onChange={e => setSystemEmailConfig({ ...systemEmailConfig, SYSTEM_SMTP_USERNAME: e.target.value })}
+                            placeholder="your-email@gmail.com"
+                            style={{ fontSize: '13px' }}
+                        />
+                    </div>
+                    <div>
+                        <label className="form-label" style={{ fontSize: '12px', marginBottom: '6px' }}>
+                            {t('enterprise.systemEmail.password', 'SMTP Password / App Password')}
+                        </label>
+                        <input
+                            className="form-input"
+                            type="password"
+                            value={systemEmailConfig.SYSTEM_SMTP_PASSWORD}
+                            onChange={e => setSystemEmailConfig({ ...systemEmailConfig, SYSTEM_SMTP_PASSWORD: e.target.value })}
+                            placeholder="••••••••"
+                            style={{ fontSize: '13px' }}
+                        />
+                    </div>
+                    <div>
+                        <label className="form-label" style={{ fontSize: '12px', marginBottom: '6px' }}>
+                            {t('enterprise.systemEmail.timeout', 'Timeout (seconds)')}
+                        </label>
+                        <input
+                            className="form-input"
+                            type="number"
+                            value={systemEmailConfig.SYSTEM_SMTP_TIMEOUT_SECONDS}
+                            onChange={e => setSystemEmailConfig({ ...systemEmailConfig, SYSTEM_SMTP_TIMEOUT_SECONDS: parseInt(e.target.value) || 15 })}
+                            placeholder="15"
+                            style={{ fontSize: '13px' }}
+                        />
+                    </div>
+                    <div style={{ display: 'flex', alignItems: 'center', paddingTop: '24px' }}>
+                        <label style={{ display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer' }}>
+                            <input
+                                type="checkbox"
+                                checked={systemEmailConfig.SYSTEM_SMTP_SSL}
+                                onChange={e => setSystemEmailConfig({ ...systemEmailConfig, SYSTEM_SMTP_SSL: e.target.checked })}
+                                style={{ width: '16px', height: '16px' }}
+                            />
+                            <span style={{ fontSize: '13px' }}>
+                                {t('enterprise.systemEmail.useSsl', 'Use SSL/TLS')}
+                            </span>
+                        </label>
+                    </div>
+                </div>
+                <div style={{ marginTop: '16px', display: 'flex', gap: '8px', alignItems: 'center' }}>
+                    <button className="btn btn-primary" onClick={saveEmailConfig} disabled={emailConfigSaving}>
+                        {emailConfigSaving ? t('common.loading') : t('common.save', 'Save')}
+                    </button>
+                    {emailConfigSaved && <span style={{ color: 'var(--success)', fontSize: '12px' }}>✅ {t('common.saved', 'Saved')}</span>}
+                </div>
+                <div style={{ marginTop: '12px', fontSize: '11px', color: 'var(--text-tertiary)' }}>
+                    💡 {t('enterprise.systemEmail.hint', 'For Gmail, use an App Password. For QQ/163 mail, use the SMTP authorization code.')}
                 </div>
             </div>
         </>
