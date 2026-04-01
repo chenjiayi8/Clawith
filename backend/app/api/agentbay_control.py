@@ -819,9 +819,13 @@ const { chromium } = require('/usr/local/lib/node_modules/playwright');
             if (out.expires != null && out.expires <= 0) {
                 delete out.expires;
             }
-            // addCookies wants domain WITHOUT leading dot
-            if (out.domain && out.domain.startsWith('.')) {
-                out.domain = out.domain.slice(1);
+            // Ensure domain has leading dot so it matches subdomains.
+            // Playwright's context.cookies() strips the leading dot from
+            // domain cookies, turning them into host-only. Chrome's CDP
+            // Network.setCookie needs the dot to match subdomains (e.g.,
+            // ".xiaohongshu.com" matches www.xiaohongshu.com).
+            if (out.domain && !out.domain.startsWith('.')) {
+                out.domain = '.' + out.domain;
             }
             return out;
         });

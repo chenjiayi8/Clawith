@@ -824,9 +824,9 @@ const { chromium } = require('/usr/local/lib/node_modules/playwright');
             if (out.expires != null && out.expires <= 0) {
                 delete out.expires;
             }
-            // addCookies wants domain WITHOUT leading dot
-            if (out.domain && out.domain.startsWith('.')) {
-                out.domain = out.domain.slice(1);
+            // Ensure domain has leading dot for subdomain matching
+            if (out.domain && !out.domain.startsWith('.')) {
+                out.domain = '.' + out.domain;
             }
             return out;
         });
