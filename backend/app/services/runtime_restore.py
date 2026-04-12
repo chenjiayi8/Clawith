@@ -133,11 +133,27 @@ async def restore_agent_runtime(db, agent) -> RuntimeRestoreItem:
             container.start()
             return RuntimeRestoreItem("agent", str(agent.id), "started", container_id=container.id)
         except DockerContainerMissing:
-            manager = AgentManager()
-            container_id = await manager.start_container(db, agent)
-            if container_id:
-                return RuntimeRestoreItem("agent", str(agent.id), "created", container_id=container_id)
-            return RuntimeRestoreItem("agent", str(agent.id), "error", "AgentManager.start_container returned no container")
+            manager = None
+            try:
+                manager = AgentManager()
+                container_id = await manager.start_container(db, agent)
+                if container_id:
+                    return RuntimeRestoreItem("agent", str(agent.id), "created", container_id=container_id)
+                return RuntimeRestoreItem(
+                    "agent",
+                    str(agent.id),
+                    "error",
+                    "AgentManager.start_container returned no container",
+                )
+            except Exception as exc:
+                logger.exception("Error restoring agent {}", agent.id)
+                return RuntimeRestoreItem("agent", str(agent.id), "error", str(exc))
+            finally:
+                if manager is not None:
+                    manager_client = getattr(manager, "docker_client", None)
+                    close = getattr(manager_client, "close", None)
+                    if manager_client is not client and close:
+                        close()
     except DockerException as exc:
         logger.exception("Docker error restoring agent {}", agent.id)
         return RuntimeRestoreItem("agent", str(agent.id), "error", str(exc))

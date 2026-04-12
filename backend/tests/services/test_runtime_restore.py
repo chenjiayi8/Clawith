@@ -172,8 +172,12 @@ async def test_restore_agent_missing_container_calls_agent_manager(monkeypatch):
     monkeypatch.setattr(runtime_restore, "_get_docker_client", lambda: fake_docker)
 
     calls = []
+    manager_docker = FakeDocker(FakeImages(set()), FakeContainers())
 
     class FakeAgentManager:
+        def __init__(self):
+            self.docker_client = manager_docker
+
         async def start_container(self, db, agent_arg):
             calls.append((db, agent_arg))
             agent_arg.container_id = "new-agent-container"
@@ -186,6 +190,7 @@ async def test_restore_agent_missing_container_calls_agent_manager(monkeypatch):
     assert result.action == "created"
     assert result.container_id == "new-agent-container"
     assert calls[0][1] is agent
+    assert manager_docker.closed is True
 
 
 @pytest.mark.asyncio
@@ -201,3 +206,93 @@ async def test_restore_agent_stopped_container_starts_existing(monkeypatch):
     assert result.action == "started"
     assert result.container_id == "agent-container"
     assert started == [True]
+
+
+@pytest.mark.asyncio
+async def test_restore_agent_missing_container_reports_manager_error_and_closes(monkeypatch):
+    agent = SimpleNamespace(id="agent-id", container_id="missing", status="running")
+    fake_docker = FakeDocker(FakeImages(set()), FakeContainers())
+    manager_docker = FakeDocker(FakeImages(set()), FakeContainers())
+    monkeypatch.setattr(runtime_restore, "_get_docker_client", lambda: fake_docker)
+
+    class FakeAgentManager:
+        def __init__(self):
+            self.docker_client = manager_docker
+
+        async def start_container(self, db, agent_arg):
+            raise RuntimeError("agent files unavailable")
+
+    monkeypatch.setattr(runtime_restore, "AgentManager", FakeAgentManager)
+
+    result = await runtime_restore.restore_agent_runtime(object(), agent)
+
+    assert result.action == "error"
+    assert result.message == "agent files unavailable"
+    assert fake_docker.closed is True
+    assert manager_docker.closed is True
+
+
+@pytest.mark.asyncio
+async def test_restore_managed_runtimes_updates_workspace_container_id_and_commits(monkeypatch):
+    workspace = SimpleNamespace(container_id="old-workspace-container")
+    agent = SimpleNamespace(id="agent-id")
+
+    class FakeRows:
+        def __init__(self, rows):
+            self.rows = rows
+
+        def scalars(self):
+            return self
+
+        def all(self):
+            return self.rows
+
+    class FakeSession:
+        def __init__(self):
+            self.commits = 0
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            return None
+
+        async def execute(self, statement):
+            entity = statement.column_descriptions[0]["entity"]
+            if entity is runtime_restore.WorkspaceProject:
+                return FakeRows([workspace])
+            if entity is runtime_restore.Agent:
+                return FakeRows([agent])
+            return FakeRows([])
+
+        async def commit(self):
+            self.commits += 1
+
+    fake_session = FakeSession()
+    monkeypatch.setattr(runtime_restore, "async_session", lambda: fake_session)
+
+    async def fake_restore_workspace_project(project_arg):
+        assert project_arg is workspace
+        return runtime_restore.RuntimeRestoreItem(
+            "workspace",
+            "node-demo",
+            "created",
+            container_id="new-workspace-container",
+        )
+
+    async def fake_restore_agent_runtime(db, agent_arg):
+        assert db is fake_session
+        assert agent_arg is agent
+        return runtime_restore.RuntimeRestoreItem("agent", "agent-id", "unchanged", container_id="agent-container")
+
+    monkeypatch.setattr(runtime_restore, "restore_workspace_project", fake_restore_workspace_project)
+    monkeypatch.setattr(runtime_restore, "restore_agent_runtime", fake_restore_agent_runtime)
+
+    result = await runtime_restore.restore_managed_runtimes()
+
+    assert workspace.container_id == "new-workspace-container"
+    assert fake_session.commits == 1
+    assert [(item.runtime_type, item.key, item.action) for item in result.items] == [
+        ("workspace", "node-demo", "created"),
+        ("agent", "agent-id", "unchanged"),
+    ]
