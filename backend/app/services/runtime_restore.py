@@ -5,8 +5,13 @@ from pathlib import Path
 
 from docker.errors import DockerException, ImageNotFound, NotFound
 from loguru import logger
+from sqlalchemy import select
 
 from app.config import get_settings
+from app.database import async_session
+from app.models.agent import Agent
+from app.models.workspace import WorkspaceProject
+from app.services.agent_manager import AgentManager
 from app.services.workspace_tools import (
     _get_docker_client,
     _reload_gateway,
@@ -115,3 +120,58 @@ async def restore_workspace_project(project) -> RuntimeRestoreItem:
             close = getattr(client, "close", None)
             if close:
                 close()
+
+
+async def restore_agent_runtime(db, agent) -> RuntimeRestoreItem:
+    client = None
+    try:
+        client = _get_docker_client()
+        try:
+            container = _get_container(client, agent.container_id)
+            if container.status == "running":
+                return RuntimeRestoreItem("agent", str(agent.id), "unchanged", container_id=container.id)
+            container.start()
+            return RuntimeRestoreItem("agent", str(agent.id), "started", container_id=container.id)
+        except DockerContainerMissing:
+            manager = AgentManager()
+            container_id = await manager.start_container(db, agent)
+            if container_id:
+                return RuntimeRestoreItem("agent", str(agent.id), "created", container_id=container_id)
+            return RuntimeRestoreItem("agent", str(agent.id), "error", "AgentManager.start_container returned no container")
+    except DockerException as exc:
+        logger.exception("Docker error restoring agent {}", agent.id)
+        return RuntimeRestoreItem("agent", str(agent.id), "error", str(exc))
+    finally:
+        if client is not None:
+            close = getattr(client, "close", None)
+            if close:
+                close()
+
+
+async def restore_managed_runtimes() -> RuntimeRestoreResult:
+    result = RuntimeRestoreResult()
+    async with async_session() as db:
+        workspace_rows = await db.execute(
+            select(WorkspaceProject).where(
+                WorkspaceProject.deploy_type == "container",
+                WorkspaceProject.status == "deployed",
+            )
+        )
+        for project in workspace_rows.scalars().all():
+            item = await restore_workspace_project(project)
+            result.add(item)
+            if item.container_id and item.container_id != project.container_id:
+                project.container_id = item.container_id
+
+        agent_rows = await db.execute(select(Agent).where(Agent.status == "running"))
+        for agent in agent_rows.scalars().all():
+            item = await restore_agent_runtime(db, agent)
+            result.add(item)
+
+        await db.commit()
+
+    logger.info(
+        "Runtime restore completed: {}",
+        [{"type": item.runtime_type, "key": item.key, "action": item.action} for item in result.items],
+    )
+    return result

@@ -163,3 +163,41 @@ async def test_restore_workspace_reports_docker_client_error(monkeypatch):
 
     assert result.action == "error"
     assert result.message == "socket unavailable"
+
+
+@pytest.mark.asyncio
+async def test_restore_agent_missing_container_calls_agent_manager(monkeypatch):
+    agent = SimpleNamespace(id="agent-id", container_id="missing", status="running")
+    fake_docker = FakeDocker(FakeImages(set()), FakeContainers())
+    monkeypatch.setattr(runtime_restore, "_get_docker_client", lambda: fake_docker)
+
+    calls = []
+
+    class FakeAgentManager:
+        async def start_container(self, db, agent_arg):
+            calls.append((db, agent_arg))
+            agent_arg.container_id = "new-agent-container"
+            return "new-agent-container"
+
+    monkeypatch.setattr(runtime_restore, "AgentManager", FakeAgentManager)
+
+    result = await runtime_restore.restore_agent_runtime(object(), agent)
+
+    assert result.action == "created"
+    assert result.container_id == "new-agent-container"
+    assert calls[0][1] is agent
+
+
+@pytest.mark.asyncio
+async def test_restore_agent_stopped_container_starts_existing(monkeypatch):
+    started = []
+    container = SimpleNamespace(id="agent-container", status="exited", start=lambda: started.append(True))
+    fake_docker = FakeDocker(FakeImages(set()), FakeContainers(by_id={"agent-container": container}))
+    monkeypatch.setattr(runtime_restore, "_get_docker_client", lambda: fake_docker)
+
+    agent = SimpleNamespace(id="agent-id", container_id="agent-container", status="running")
+    result = await runtime_restore.restore_agent_runtime(object(), agent)
+
+    assert result.action == "started"
+    assert result.container_id == "agent-container"
+    assert started == [True]
