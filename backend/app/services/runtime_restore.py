@@ -1,8 +1,10 @@
 """Restore Docker runtimes managed by consultant_backend."""
 
-import logging
 from dataclasses import dataclass, field
 from pathlib import Path
+
+from docker.errors import DockerException, ImageNotFound, NotFound
+from loguru import logger
 
 from app.config import get_settings
 from app.services.workspace_tools import (
@@ -13,20 +15,6 @@ from app.services.workspace_tools import (
     workspace_nginx_conf_content,
 )
 
-try:
-    from docker.errors import DockerException, ImageNotFound, NotFound
-except ModuleNotFoundError:
-    class DockerException(Exception):
-        pass
-
-    class ImageNotFound(DockerException):
-        pass
-
-    class NotFound(DockerException):
-        pass
-
-
-logger = logging.getLogger(__name__)
 settings = get_settings()
 
 
