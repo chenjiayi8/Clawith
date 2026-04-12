@@ -62,6 +62,48 @@ def _get_docker_client():
     return docker.DockerClient(base_url="unix:///var/run/docker.sock")
 
 
+def workspace_container_name(slug: str) -> str:
+    return f"ws-{slug}"
+
+
+def workspace_image_tag(slug: str) -> str:
+    return f"ws-{slug}:latest"
+
+
+def build_workspace_container_kwargs(
+    slug: str,
+    image_tag: str,
+    resource_limits: dict | None = None,
+) -> dict:
+    limits = resource_limits or {}
+    container_name = workspace_container_name(slug)
+    kwargs = {
+        "image": image_tag,
+        "name": container_name,
+        "hostname": container_name,
+        "detach": True,
+        "restart_policy": {"Name": "unless-stopped"},
+        "network": "workspace",
+    }
+    if limits.get("memory"):
+        kwargs["mem_limit"] = limits["memory"]
+    if limits.get("cpus"):
+        kwargs["nano_cpus"] = int(float(limits["cpus"]) * 1e9)
+    return kwargs
+
+
+def workspace_nginx_conf_content(slug: str, port: int) -> str:
+    container_name = workspace_container_name(slug)
+    return f"""location /workspace/{slug}/ {{
+    proxy_pass http://{container_name}:{port}/;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+}}
+"""
+
+
 async def tool_request_build(
     agent_id: uuid.UUID, arguments: dict
 ) -> str:
@@ -536,8 +578,8 @@ async def approve_container_deploy(slug: str, resource_limits: dict | None = Non
     # Build and start container
     try:
         client = _get_docker_client()
-        container_name = f"ws-{slug}"
-        image_tag = f"ws-{slug}:latest"
+        container_name = workspace_container_name(slug)
+        image_tag = workspace_image_tag(slug)
 
         # Build the image
         logger.info("Building Docker image '%s' from %s", image_tag, build_context)
@@ -558,21 +600,7 @@ async def approve_container_deploy(slug: str, resource_limits: dict | None = Non
         except Exception:
             pass
 
-        # Prepare container kwargs
-        container_kwargs = {
-            "image": image_tag,
-            "name": container_name,
-            "hostname": container_name,
-            "detach": True,
-            "restart_policy": {"Name": "unless-stopped"},
-            "network": "workspace",
-        }
-
-        # Apply resource limits
-        if limits.get("memory"):
-            container_kwargs["mem_limit"] = limits["memory"]
-        if limits.get("cpus"):
-            container_kwargs["nano_cpus"] = int(float(limits["cpus"]) * 1e9)
+        container_kwargs = build_workspace_container_kwargs(slug, image_tag, limits)
 
         # Start the container
         logger.info("Starting container '%s'", container_name)
@@ -591,14 +619,7 @@ async def approve_container_deploy(slug: str, resource_limits: dict | None = Non
         return {"ok": False, "error": f"Docker build/start failed: {e}"}
 
     # Write nginx conf snippet
-    conf_content = f"""location /workspace/{slug}/ {{
-    proxy_pass http://{container_name}:{port}/;
-    proxy_set_header Host $host;
-    proxy_set_header X-Real-IP $remote_addr;
-    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-    proxy_set_header X-Forwarded-Proto $scheme;
-}}
-"""
+    conf_content = workspace_nginx_conf_content(slug, port)
     conf_path = Path(settings.WORKSPACE_CONF_DIR) / f"{slug}.conf"
     conf_path.write_text(conf_content, encoding="utf-8")
     logger.info("Wrote nginx conf for '%s'", slug)
