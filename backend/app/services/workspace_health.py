@@ -10,6 +10,7 @@ from sqlalchemy import select, update
 from app.config import get_settings
 from app.database import async_session
 from app.models.workspace import WorkspaceBugReport, WorkspaceProject
+from app.services.runtime_restore import restore_managed_runtimes
 
 logger = logging.getLogger(__name__)
 
@@ -23,10 +24,15 @@ AUTO_FIX_WINDOW = timedelta(hours=24)
 
 
 async def run_health_checks():
-    """Background loop that checks workspace project health every 5 minutes."""
+    """Background loop that restores and checks workspace project health every 5 minutes."""
     logger.info("Workspace health check task started")
     while True:
         try:
+            restore_result = await restore_managed_runtimes()
+            logger.info(
+                "Runtime restore checked %d managed runtimes before health checks",
+                len(restore_result.items),
+            )
             await _check_all_projects()
         except Exception:
             logger.exception("Health check cycle failed")
