@@ -1,16 +1,19 @@
 """Workspace deployment tools for the Software Engineer agent."""
 
+import json
 import re
-import uuid
 import logging
+import shutil
+import uuid
 from pathlib import Path
 
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.exc import IntegrityError
 
 from app.config import get_settings
 from app.database import async_session
 from app.models.workspace import WorkspaceBugReport, WorkspaceProject
+from app.services.workspace_index import regenerate_index
 
 logger = logging.getLogger(__name__)
 
@@ -44,16 +47,6 @@ async def check_slug_available(slug: str) -> str | None:
         if existing.scalar_one_or_none():
             return f"Slug '{slug}' is already in use."
     return None
-
-
-import asyncio
-import html as html_mod
-import json
-import shutil
-
-from sqlalchemy.exc import IntegrityError
-
-from app.services.workspace_index import regenerate_index
 
 
 def _get_docker_client():
@@ -558,7 +551,7 @@ async def approve_container_deploy(slug: str, resource_limits: dict | None = Non
     agent_ws = Path(settings.AGENT_DATA_DIR) / str(agent_id)
     # Search for Dockerfile in workspace subdirectories
     dockerfile_candidates = list(agent_ws.glob(f"workspace/{slug}/**/Dockerfile")) + \
-                           list(agent_ws.glob(f"workspace/**/Dockerfile"))
+                           list(agent_ws.glob("workspace/**/Dockerfile"))
     if not dockerfile_candidates:
         # Also check for any Dockerfile in the workspace
         dockerfile_candidates = list(agent_ws.glob("workspace/**/Dockerfile"))
