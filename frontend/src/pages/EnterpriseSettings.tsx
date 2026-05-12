@@ -1020,20 +1020,21 @@ export default function EnterpriseSettings() {
     const [quotaSaving, setQuotaSaving] = useState(false);
     const [quotaSaved, setQuotaSaved] = useState(false);
     const [utilityModelId, setUtilityModelId] = useState<string>('');
+    const tenantQuotaPath = `/enterprise/tenant-quotas${selectedTenantId ? `?tenant_id=${encodeURIComponent(selectedTenantId)}` : ''}`;
     useEffect(() => {
         if (activeTab === 'quotas' || activeTab === 'llm') {
-            fetchJson<any>('/enterprise/tenant-quotas').then(d => {
+            fetchJson<any>(tenantQuotaPath).then(d => {
                 if (d && Object.keys(d).length) {
                     setQuotaForm(f => ({ ...f, ...d }));
                     setUtilityModelId(d.utility_model_id || '');
                 }
             }).catch(() => { });
         }
-    }, [activeTab]);
+    }, [activeTab, tenantQuotaPath]);
     const saveQuotas = async () => {
         setQuotaSaving(true);
         try {
-            await fetchJson('/enterprise/tenant-quotas', { method: 'PATCH', body: JSON.stringify(quotaForm) });
+            await fetchJson(tenantQuotaPath, { method: 'PATCH', body: JSON.stringify(quotaForm) });
             setQuotaSaved(true); setTimeout(() => setQuotaSaved(false), 2000);
         } catch (e) { alert('Failed to save'); }
         setQuotaSaving(false);
@@ -1265,7 +1266,7 @@ export default function EnterpriseSettings() {
                                         const val = e.target.value;
                                         setUtilityModelId(val);
                                         try {
-                                            await fetchJson('/enterprise/tenant-quotas', {
+                                            await fetchJson(tenantQuotaPath, {
                                                 method: 'PATCH',
                                                 body: JSON.stringify({ utility_model_id: val || '' }),
                                             });

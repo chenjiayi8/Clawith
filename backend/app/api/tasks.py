@@ -130,7 +130,7 @@ async def get_task_logs(
     result = await db.execute(
         select(TaskLog).where(TaskLog.task_id == task_id).order_by(TaskLog.created_at.asc())
     )
-    return [TaskLogOut.model_validate(l) for l in result.scalars().all()]
+    return [TaskLogOut.model_validate(log_entry) for log_entry in result.scalars().all()]
 
 
 @router.post("/{task_id}/logs", response_model=TaskLogOut, status_code=status.HTTP_201_CREATED)

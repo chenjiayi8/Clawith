@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.permissions import check_agent_access
 from app.core.security import get_current_user, get_current_admin
 from app.database import get_db
-from app.models.agent import Agent, AgentTemplate
+from app.models.agent import AgentTemplate
 from app.models.user import User
 from app.services.collaboration import collaboration_service
 
@@ -271,6 +271,16 @@ async def get_agent_metrics(
         "tokens": {
             "used_today": agent.tokens_used_today,
             "used_month": agent.tokens_used_month,
+            "used_total": agent.tokens_used_total,
+            "cache_read_today": agent.cache_read_tokens_today,
+            "cache_read_month": agent.cache_read_tokens_month,
+            "cache_read_total": agent.cache_read_tokens_total,
+            "cache_creation_today": agent.cache_creation_tokens_today,
+            "cache_creation_month": agent.cache_creation_tokens_month,
+            "cache_creation_total": agent.cache_creation_tokens_total,
+            "cache_hit_rate_today": round((agent.cache_read_tokens_today or 0) / max(agent.tokens_used_today or 0, 1), 4),
+            "cache_hit_rate_month": round((agent.cache_read_tokens_month or 0) / max(agent.tokens_used_month or 0, 1), 4),
+            "cache_hit_rate_total": round((agent.cache_read_tokens_total or 0) / max(agent.tokens_used_total or 0, 1), 4),
             "limit_day": agent.max_tokens_per_day,
             "limit_month": agent.max_tokens_per_month,
         },

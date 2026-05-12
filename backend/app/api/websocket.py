@@ -3,24 +3,26 @@
 import json
 import re
 import uuid
+from datetime import datetime, timezone as tz
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Query
 from loguru import logger
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import selectinload
 
 from app.core.security import decode_access_token
 from app.core.permissions import check_agent_access, is_agent_expired
 from app.database import async_session
 from app.models.agent import Agent
 from app.models.audit import ChatMessage
+from app.models.chat_session import ChatSession
 from app.models.llm import LLMModel
 from app.models.user import User
+from app.services.chat_session_service import ensure_primary_platform_session
+from app.services.llm import call_llm_with_failover
 
 router = APIRouter(tags=["websocket"])
 
-# ── Skill prefix pattern (any depth) ──
 _SKILL_RE = re.compile(r"^/([a-z0-9_-]+(?::[a-z0-9_-]+)*)")
 
 
@@ -28,12 +30,11 @@ async def _resolve_skill_content(
     skill_key: str,
     agent_id: uuid.UUID,
 ) -> tuple[str | None, str | None, str | None]:
-    """Resolve skill content by colon key lookup.
-    Returns (content, display_name, emoji) or (None, None, None) if not found.
-    """
+    """Resolve skill content by colon key lookup."""
     import asyncio
+
+    from app.services.agent_context import PERSISTENT_DATA, TOOL_WORKSPACE
     from app.services.skill_map import get_skill_map
-    from app.services.agent_context import TOOL_WORKSPACE, PERSISTENT_DATA
 
     skill_map = get_skill_map(agent_id)
     entry = skill_map.get(skill_key)
@@ -44,23 +45,57 @@ async def _resolve_skill_content(
     if not file_rel:
         return None, None, None
 
-    # Try both workspace roots
     for ws_root in [TOOL_WORKSPACE / str(agent_id), PERSISTENT_DATA / str(agent_id)]:
         file_path = (ws_root / "skills" / file_rel).resolve()
         skills_root = (ws_root / "skills").resolve()
-        # Path traversal check
         if not str(file_path).startswith(str(skills_root)):
             continue
         if file_path.exists():
             content = await asyncio.to_thread(
-                file_path.read_text, encoding="utf-8", errors="replace"
+                file_path.read_text,
+                encoding="utf-8",
+                errors="replace",
             )
             return content, entry.get("name", skill_key), entry.get("emoji", "")
 
     return None, None, None
 
 
-async def _inject_skill_if_matched(content, agent_id, user_id, conv_id, db, conversation, websocket):
+async def _persist_and_inject_skill(
+    skill_content: str,
+    agent_id: uuid.UUID,
+    user_id: uuid.UUID,
+    conv_id: str,
+    db: AsyncSession,
+    conversation: list[dict],
+    websocket: WebSocket,
+) -> None:
+    """Persist a hidden user-context message and append it to the LLM conversation."""
+    hidden_msg = ChatMessage(
+        agent_id=agent_id,
+        user_id=user_id,
+        role="user",
+        content=skill_content,
+        conversation_id=conv_id,
+        is_hidden=True,
+    )
+    db.add(hidden_msg)
+    await db.commit()
+    conversation.append({"role": "user", "content": skill_content})
+    if not hasattr(websocket, "_hidden_indices"):
+        websocket._hidden_indices = set()
+    websocket._hidden_indices.add(len(conversation) - 1)
+
+
+async def _inject_skill_if_matched(
+    content: str,
+    agent_id: uuid.UUID,
+    user_id: uuid.UUID,
+    conv_id: str,
+    db: AsyncSession,
+    conversation: list[dict],
+    websocket: WebSocket,
+) -> None:
     """Parse skill prefix from content and inject hidden context if found."""
     match = _SKILL_RE.match(content)
     if not match:
@@ -70,66 +105,181 @@ async def _inject_skill_if_matched(content, agent_id, user_id, conv_id, db, conv
     skill_content, display_name, emoji = await _resolve_skill_content(skill_key, agent_id)
     if skill_content:
         await _persist_and_inject_skill(skill_content, agent_id, user_id, conv_id, db, conversation, websocket)
-        await websocket.send_json({"type": "skill_loaded", "name": display_name, "emoji": emoji or "", "content": skill_content})
+        await websocket.send_json(
+            {
+                "type": "skill_loaded",
+                "name": display_name,
+                "emoji": emoji or "",
+                "content": skill_content,
+            }
+        )
     elif ":" in skill_key:
-        # Explicit colon path that doesn't resolve — send error
         await websocket.send_json({"type": "skill_error", "message": f"Skill '{skill_key}' not found"})
-    # Simple /word with no match — treat as normal message, no error
 
 
-async def _persist_and_inject_skill(skill_content, agent_id, user_id, conv_id, db, conversation, websocket):
-    """Save hidden message to DB and add to in-memory conversation."""
-    hidden_msg = ChatMessage(
-        agent_id=agent_id, user_id=user_id,
-        role="user", content=skill_content,
-        conversation_id=conv_id, is_hidden=True,
-    )
-    db.add(hidden_msg)
-    await db.commit()
-    conversation.append({"role": "user", "content": skill_content})
-    if not hasattr(websocket, '_hidden_indices'):
-        websocket._hidden_indices = set()
-    websocket._hidden_indices.add(len(conversation) - 1)
+def _find_retry_anchor_message(messages: list, requested_message_id: str | None = None):
+    """Find the visible user message a retry/regenerate request should replay.
+
+    Rules:
+    - If `requested_message_id` points at a user message, retry that turn.
+    - If it points at an assistant/tool message, retry the nearest preceding
+      visible user message.
+    - If omitted, retry the most recent visible user message in the thread.
+    Hidden skill-injection messages are never used as retry anchors.
+    """
+    if not messages:
+        return None
+
+    target_index = len(messages) - 1
+    if requested_message_id:
+        requested = str(requested_message_id)
+        for idx, msg in enumerate(messages):
+            msg_id = getattr(msg, "id", None)
+            if msg_id and str(msg_id) == requested:
+                target_index = idx
+                break
+        else:
+            return None
+
+    for idx in range(target_index, -1, -1):
+        msg = messages[idx]
+        if getattr(msg, "role", None) == "user" and not getattr(msg, "is_hidden", False):
+            return msg
+    return None
+
+
+def _rebuild_conversation_from_messages(
+    messages: list,
+    conversation: list[dict],
+    websocket: WebSocket,
+) -> None:
+    """Rebuild the in-memory LLM conversation from persisted chat messages."""
+    conversation.clear()
+    websocket._hidden_indices = set()
+    for rmsg in messages:
+        if rmsg.role == "tool_call":
+            try:
+                tc_data = json.loads(rmsg.content)
+                tc_id = f"call_{rmsg.id}"
+                conversation.append(
+                    {
+                        "role": "assistant",
+                        "content": None,
+                        "tool_calls": [
+                            {
+                                "id": tc_id,
+                                "type": "function",
+                                "function": {
+                                    "name": tc_data.get("name", "unknown"),
+                                    "arguments": json.dumps(tc_data.get("args", {}), ensure_ascii=False),
+                                },
+                            }
+                        ],
+                    }
+                )
+                conversation.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": tc_id,
+                        "content": str(tc_data.get("result", ""))[:500],
+                    }
+                )
+            except Exception:
+                continue
+        else:
+            conversation.append({"role": rmsg.role, "content": rmsg.content})
+            if getattr(rmsg, "is_hidden", False):
+                websocket._hidden_indices.add(len(conversation) - 1)
 
 
 class ConnectionManager:
     """Manage WebSocket connections per agent."""
 
     def __init__(self):
-        # agent_id_str -> list of (WebSocket, session_id_str | None)
+        # agent_id_str -> list of (WebSocket, session_id_str | None, user_id_str | None)
         self.active_connections: dict[str, list[tuple]] = {}
 
-    async def connect(self, agent_id: str, websocket: WebSocket, session_id: str = None):
+    async def connect(self, agent_id: str, websocket: WebSocket, session_id: str = None, user_id: str | None = None):
         await websocket.accept()
         if agent_id not in self.active_connections:
             self.active_connections[agent_id] = []
-        self.active_connections[agent_id].append((websocket, session_id))
+        self.active_connections[agent_id].append((websocket, session_id, user_id))
 
     def disconnect(self, agent_id: str, websocket: WebSocket):
         if agent_id in self.active_connections:
             self.active_connections[agent_id] = [
-                (ws, sid) for ws, sid in self.active_connections[agent_id] if ws != websocket
+                (ws, sid, uid) for ws, sid, uid in self.active_connections[agent_id] if ws != websocket
             ]
 
     async def send_message(self, agent_id: str, message: dict):
         if agent_id in self.active_connections:
-            for ws, _sid in self.active_connections[agent_id]:
-                await ws.send_json(message)
+            for ws, _sid, _uid in self.active_connections[agent_id]:
+                try:
+                    await ws.send_json(message)
+                except Exception:
+                    pass
+
+    async def send_to_session(self, agent_id: str, session_id: str, message: dict):
+        """Send message only to WebSocket connections matching the given session_id."""
+        if agent_id in self.active_connections:
+            for ws, sid, _uid in self.active_connections[agent_id]:
+                if sid == session_id:
+                    try:
+                        await ws.send_json(message)
+                    except Exception:
+                        pass
+
+    async def send_to_user(self, agent_id: str, user_id: str, message: dict):
+        """Send message to all live WebSocket sessions of a given platform user for an agent."""
+        if agent_id in self.active_connections:
+            for ws, _sid, uid in self.active_connections[agent_id]:
+                if uid == user_id:
+                    try:
+                        await ws.send_json(message)
+                    except Exception:
+                        pass
 
     def get_active_session_ids(self, agent_id: str) -> list[str]:
         """Return distinct session IDs for all active WS connections of an agent."""
         if agent_id not in self.active_connections:
             return []
-        return list(set(sid for _ws, sid in self.active_connections[agent_id] if sid))
+        return list(set(sid for _ws, sid, _uid in self.active_connections[agent_id] if sid))
+
+    def is_user_viewing_session(self, agent_id: str, session_id: str, user_id: str) -> bool:
+        """Return True if the given platform user currently has this exact session open."""
+        if agent_id not in self.active_connections:
+            return False
+        for _ws, sid, uid in self.active_connections[agent_id]:
+            if sid == session_id and uid == user_id:
+                return True
+        return False
 
 
 manager = ConnectionManager()
 
 
+async def maybe_mark_session_read_for_active_viewer(
+    db: AsyncSession,
+    *,
+    agent_id: uuid.UUID,
+    session_id: str,
+    user_id: uuid.UUID,
+) -> bool:
+    """Advance last_read_at_by_user if the owner is actively viewing this exact session."""
+    if not manager.is_user_viewing_session(str(agent_id), session_id, str(user_id)):
+        return False
+
+    session = await db.get(ChatSession, uuid.UUID(session_id))
+    if not session:
+        return False
+
+    session.last_read_at_by_user = datetime.now(tz.utc)
+    return True
+
+
 from fastapi import Depends
 from app.core.security import get_current_user
 from app.database import get_db
-from app.models.user import User
 
 
 @router.get("/api/chat/{agent_id}/history")
@@ -147,10 +297,16 @@ async def get_chat_history(
         .limit(200)
     )
     messages = result.scalars().all()
-    messages = [m for m in messages if not getattr(m, 'is_hidden', False)]
     out = []
     for m in messages:
-        entry: dict = {"id": str(m.id), "role": m.role, "content": m.content, "created_at": m.created_at.isoformat() if m.created_at else None}
+        entry: dict = {
+            "id": str(m.id),
+            "role": m.role,
+            "content": m.content,
+            "created_at": m.created_at.isoformat() if m.created_at else None,
+        }
+        if getattr(m, "is_hidden", False):
+            entry["is_hidden"] = True
         if getattr(m, 'thinking', None):
             entry["thinking"] = m.thinking
         if m.role == "tool_call":
@@ -163,294 +319,11 @@ async def get_chat_history(
                 entry["toolArgs"] = data.get("args")
                 entry["toolStatus"] = data.get("status", "done")
                 entry["toolResult"] = data.get("result", "")
+                entry["toolThinking"] = data.get("reasoning_content", "")
             except Exception:
                 pass
         out.append(entry)
     return out
-
-
-async def call_llm(
-    model: LLMModel,
-    messages: list[dict],
-    agent_name: str,
-    role_description: str,
-    agent_id=None,
-    user_id=None,
-    on_chunk=None,
-    on_tool_call=None,
-    on_thinking=None,
-    supports_vision=False,
-) -> str:
-    """Call LLM via unified client with function-calling tool loop.
-
-    Args:
-        on_chunk: Optional async callback(text: str) for streaming chunks to client.
-        on_thinking: Optional async callback(text: str) for reasoning/thinking content.
-        on_tool_call: Optional async callback(dict) for tool call status updates.
-    """
-    from app.services.agent_tools import AGENT_TOOLS, execute_tool, get_agent_tools_for_llm
-    from app.services.llm_utils import create_llm_client, get_max_tokens, LLMMessage, LLMError
-
-    # ── Token limit check & config ──
-    _max_tool_rounds = 50  # default
-    if agent_id:
-        try:
-            from app.models.agent import Agent as AgentModel
-            async with async_session() as _db:
-                _ar = await _db.execute(select(AgentModel).where(AgentModel.id == agent_id))
-                _agent = _ar.scalar_one_or_none()
-                if _agent:
-                    _max_tool_rounds = _agent.max_tool_rounds or 50
-                    if _agent.max_tokens_per_day and _agent.tokens_used_today >= _agent.max_tokens_per_day:
-                        return f"⚠️ Daily token usage has reached the limit ({_agent.tokens_used_today:,}/{_agent.max_tokens_per_day:,}). Please try again tomorrow or ask admin to increase the limit."
-                    if _agent.max_tokens_per_month and _agent.tokens_used_month >= _agent.max_tokens_per_month:
-                        return f"⚠️ Monthly token usage has reached the limit ({_agent.tokens_used_month:,}/{_agent.max_tokens_per_month:,}). Please ask admin to increase the limit."
-        except Exception:
-            pass
-
-    # Build rich prompt with soul, memory, skills, relationships
-    from app.services.agent_context import build_agent_context
-    # Look up current user's display name so the agent knows who it's talking to
-    _current_user_name = None
-    if user_id:
-        try:
-            from app.models.user import User as _UserModel
-            async with async_session() as _udb:
-                _ur = await _udb.execute(select(_UserModel).where(_UserModel.id == user_id))
-                _u = _ur.scalar_one_or_none()
-                if _u:
-                    _current_user_name = _u.display_name or _u.username
-        except Exception:
-            pass
-    system_prompt = await build_agent_context(agent_id, agent_name, role_description, current_user_name=_current_user_name)
-
-    # Load tools dynamically from DB
-    tools_for_llm = await get_agent_tools_for_llm(agent_id) if agent_id else AGENT_TOOLS
-
-    # Convert messages to LLMMessage format
-    api_messages = [LLMMessage(role="system", content=system_prompt)]
-    for msg in messages:
-        api_messages.append(LLMMessage(
-            role=msg.get("role", "user"),
-            content=msg.get("content"),
-            tool_calls=msg.get("tool_calls"),
-            tool_call_id=msg.get("tool_call_id"),
-        ))
-
-    # ── Vision format conversion ──
-    # If the model supports vision, convert image markers in user messages
-    # to OpenAI Vision API format: content becomes an array of parts.
-    if supports_vision:
-        import re as _re_v
-        for i, msg in enumerate(api_messages):
-            if msg.role != "user" or not msg.content or not isinstance(msg.content, str):
-                continue
-            content_str = msg.content
-            # Find [image_data:data:image/...;base64,...] markers
-            pattern = r'\[image_data:(data:image/[^;]+;base64,[A-Za-z0-9+/=]+)\]'
-            images = _re_v.findall(pattern, content_str)
-            if not images:
-                continue
-            # Build content array
-            text = _re_v.sub(pattern, '', content_str).strip()
-            parts = []
-            for img_url in images:
-                parts.append({"type": "image_url", "image_url": {"url": img_url}})
-            if text:
-                parts.append({"type": "text", "text": text})
-            # Replace the message content with the array format
-            api_messages[i] = LLMMessage(
-                role=msg.role,
-                content=parts,  # type: ignore  # This is valid for vision models
-            )
-    else:
-        # Strip base64 image markers for non-vision models to avoid wasting tokens
-        import re as _re_strip
-        _img_pattern = r'\[image_data:data:image/[^;]+;base64,[A-Za-z0-9+/=]+\]'
-        for i, msg in enumerate(api_messages):
-            if msg.role != "user" or not isinstance(msg.content, str):
-                continue
-            if "[image_data:" in msg.content:
-                _n_imgs = len(_re_strip.findall(_img_pattern, msg.content))
-                cleaned = _re_strip.sub(_img_pattern, '', msg.content).strip()
-                if _n_imgs > 0:
-                    cleaned += f"\n[用户发送了 {_n_imgs} 张图片，但当前模型不支持视觉，无法查看图片内容]"
-                api_messages[i] = LLMMessage(
-                    role=msg.role,
-                    content=cleaned,
-                )
-
-    # Create the unified LLM client
-    try:
-        client = create_llm_client(
-            provider=model.provider,
-            api_key=model.api_key_encrypted,
-            model=model.model,
-            base_url=model.base_url,
-            timeout=120.0,
-        )
-    except Exception as e:
-        return f"[Error] Failed to create LLM client: {e}"
-
-    max_tokens = get_max_tokens(model.provider, model.model, getattr(model, 'max_output_tokens', None))
-
-    # ── Per-round token accumulator ──
-    from app.services.token_tracker import record_token_usage, extract_usage_tokens, estimate_tokens_from_chars
-    _accumulated_tokens = 0
-
-    # Tool-calling loop (configurable per agent, default 50)
-    for round_i in range(_max_tool_rounds):
-        # ── Dynamic tool-call limit warning (Aware engine) ──
-        # Don't tell the agent about limits at the start — only warn when approaching.
-        # This prevents models from rushing to complete tasks prematurely.
-        _warn_threshold_80 = int(_max_tool_rounds * 0.8)
-        _warn_threshold_96 = _max_tool_rounds - 2
-        if round_i == _warn_threshold_80:
-            api_messages.append(LLMMessage(
-                role="user",
-                content=(
-                    f"⚠️ 你已使用 {round_i}/{_max_tool_rounds} 轮工具调用。"
-                    "如果当前任务尚未完成，请尽快保存进度到 focus.md，"
-                    "并使用 set_trigger 设置续接触发器，在剩余轮次中做好收尾。"
-                ),
-            ))
-        elif round_i == _warn_threshold_96:
-            api_messages.append(LLMMessage(
-                role="user",
-                content=f"🚨 仅剩 2 轮工具调用。请立即保存进度到 focus.md 并设置续接触发器。",
-            ))
-
-        try:
-            # Use streaming API for real-time responses
-            response = await client.stream(
-                messages=api_messages,
-                tools=tools_for_llm if tools_for_llm else None,
-                temperature=model.temperature,
-                max_tokens=max_tokens,
-                on_chunk=on_chunk,
-                on_thinking=on_thinking,
-            )
-        except LLMError as e:
-            # Record accumulated tokens before returning error
-            logger.error(
-                f"[LLM] LLMError provider={getattr(model, 'provider', '?')} "
-                f"model={getattr(model, 'model', '?')} round={round_i + 1}: {e}"
-            )
-            if agent_id and _accumulated_tokens > 0:
-                await record_token_usage(agent_id, _accumulated_tokens)
-            return f"[LLM Error] {e}"
-        except Exception as e:
-            logger.error(
-                f"[LLM] Unexpected error provider={getattr(model, 'provider', '?')} "
-                f"model={getattr(model, 'model', '?')} round={round_i + 1}: "
-                f"{type(e).__name__}: {str(e)[:300]}"
-            )
-            if agent_id and _accumulated_tokens > 0:
-                await record_token_usage(agent_id, _accumulated_tokens)
-            return f"[LLM call error] {type(e).__name__}: {str(e)[:200]}"
-
-        # ── Track tokens for this round ──
-        real_tokens = extract_usage_tokens(response.usage)
-        if real_tokens:
-            _accumulated_tokens += real_tokens
-        else:
-            # Fallback: estimate from message content length
-            round_chars = sum(len(m.content or '') if isinstance(m.content, str) else 0 for m in api_messages) + len(response.content or '')
-            _accumulated_tokens += estimate_tokens_from_chars(round_chars)
-
-        # If no tool calls, return the final content
-        if not response.tool_calls:
-            if agent_id and _accumulated_tokens > 0:
-                await record_token_usage(agent_id, _accumulated_tokens)
-            await client.close()
-            return response.content or "[LLM returned empty content]"
-
-        # Execute tool calls
-        logger.info(f"[LLM] Round {round_i+1}: {len(response.tool_calls)} tool call(s), finish_reason={response.finish_reason}")
-
-        # Add assistant message with tool calls
-        api_messages.append(LLMMessage(
-            role="assistant",
-            content=response.content or None,
-            tool_calls=[{
-                "id": tc["id"],
-                "type": "function",
-                "function": tc["function"],
-            } for tc in response.tool_calls],
-            reasoning_content=response.reasoning_content,
-        ))
-
-        full_reasoning_content = response.reasoning_content or ""
-
-        # Tools that require arguments — if LLM sends empty args, skip and ask to retry
-        _TOOLS_REQUIRING_ARGS = {"write_file", "read_file", "delete_file", "read_document", "send_message_to_agent", "send_feishu_message", "send_email"}
-
-        for tc in response.tool_calls:
-            fn = tc["function"]
-            tool_name = fn["name"]
-            raw_args = fn.get("arguments", "{}")
-            logger.info(f"[LLM] Raw arguments for {tool_name} (len={len(raw_args)}): {repr(raw_args[:300])}")
-            try:
-                args = json.loads(raw_args) if raw_args else {}
-            except json.JSONDecodeError:
-                args = {}
-
-            # Guard: if a tool that requires arguments received empty args,
-            # return an error to LLM instead of executing (Claude sometimes
-            # emits tool_use blocks with no input_json_delta events)
-            if not args and tool_name in _TOOLS_REQUIRING_ARGS:
-                logger.warning(f"[LLM] Empty arguments for {tool_name}, asking LLM to retry")
-                api_messages.append(LLMMessage(
-                    role="tool",
-                    content=f"Error: {tool_name} was called with empty arguments. You must provide the required parameters. Please retry with the correct arguments.",
-                    tool_call_id=tc.get("id", ""),
-                ))
-                continue
-
-            logger.info(f"[LLM] Calling tool: {tool_name}({args})")
-            # Notify client about tool call (in-progress)
-            if on_tool_call:
-                try:
-                    await on_tool_call({
-                        "name": tool_name,
-                        "args": args,
-                        "status": "running",
-                        "reasoning_content": full_reasoning_content
-                    })
-                except Exception:
-                    pass
-
-            result = await execute_tool(
-                tool_name, args,
-                agent_id=agent_id,
-                user_id=user_id or agent_id,
-            )
-            logger.debug(f"[LLM] Tool result: {result[:100]}")
-
-            # Notify client about tool call result
-            if on_tool_call:
-                try:
-                    await on_tool_call({
-                        "name": tool_name,
-                        "args": args,
-                        "status": "done",
-                        "result": result,
-                        "reasoning_content": full_reasoning_content
-                    })
-                except Exception:
-                    pass
-
-            api_messages.append(LLMMessage(
-                role="tool",
-                tool_call_id=tc["id"],
-                content=str(result),
-            ))
-
-    # Record tokens even on "too many rounds" exit
-    if agent_id and _accumulated_tokens > 0:
-        await record_token_usage(agent_id, _accumulated_tokens)
-    await client.close()
-    return "[Error] Too many tool call rounds"
 
 
 @router.websocket("/ws/chat/{agent_id}")
@@ -459,6 +332,7 @@ async def websocket_chat(
     agent_id: uuid.UUID,
     token: str = Query(...),
     session_id: str = Query(None),
+    lang: str = Query("en"),
 ):
     """WebSocket endpoint for real-time chat with an agent.
 
@@ -510,12 +384,15 @@ async def websocket_chat(
                 await websocket.send_json({"type": "error", "content": "This Agent has expired and is off duty. Please contact your admin to extend its service."})
                 await websocket.close(code=4003)
                 return
-            _tenant_id = user.tenant_id  # Capture for title generation
             agent_name = agent.name
             agent_type = agent.agent_type or ""
             role_description = agent.role_description or ""
             welcome_message = agent.welcome_message or ""
             ctx_size = agent.context_window_size or 100
+            # Captured for onboarding lookups — the DB-bound `agent` goes out
+            # of scope when this session block closes.
+            agent_snapshot = agent
+            user_display_name = (user.display_name or "").strip() or "there"
             logger.info(f"[WS] Agent: {agent_name}, type: {agent_type}, model_id: {agent.primary_model_id}, ctx: {ctx_size}")
 
             # Load the agent's primary model
@@ -524,7 +401,11 @@ async def websocket_chat(
                     select(LLMModel).where(LLMModel.id == agent.primary_model_id)
                 )
                 llm_model = model_result.scalar_one_or_none()
-                logger.info(f"[WS] Primary model loaded: {llm_model.model if llm_model else 'None'}")
+                if llm_model and not llm_model.enabled:
+                    logger.info(f"[WS] Primary model {llm_model.model} is disabled, skipping")
+                    llm_model = None
+                else:
+                    logger.info(f"[WS] Primary model loaded: {llm_model.model if llm_model else 'None'}")
 
             # Load fallback model
             if agent.fallback_model_id:
@@ -532,7 +413,10 @@ async def websocket_chat(
                     select(LLMModel).where(LLMModel.id == agent.fallback_model_id)
                 )
                 fallback_llm_model = fb_result.scalar_one_or_none()
-                if fallback_llm_model:
+                if fallback_llm_model and not fallback_llm_model.enabled:
+                    logger.info(f"[WS] Fallback model {fallback_llm_model.model} is disabled, skipping")
+                    fallback_llm_model = None
+                elif fallback_llm_model:
                     logger.info(f"[WS] Fallback model loaded: {fallback_llm_model.model}")
 
             # Config-level fallback: primary missing -> use fallback
@@ -544,24 +428,41 @@ async def websocket_chat(
             # Resolve or create chat session
             from app.models.chat_session import ChatSession
             from sqlalchemy import select as _sel
-            from datetime import datetime as _dt, timezone as _tz
             conv_id = session_id
             if conv_id:
-                # Validate the session belongs to this agent
-                _sr = await db.execute(
-                    _sel(ChatSession).where(
-                        ChatSession.id == uuid.UUID(conv_id),
-                        ChatSession.agent_id == agent_id,
+                # Validate the session belongs to this agent and to this user.
+                try:
+                    _sid = uuid.UUID(conv_id)
+                except (ValueError, TypeError):
+                    conv_id = None
+                    _existing = None
+                else:
+                    _sr = await db.execute(
+                        _sel(ChatSession).where(
+                            ChatSession.id == _sid,
+                            ChatSession.agent_id == agent_id,
+                        )
                     )
-                )
-                _existing = _sr.scalar_one_or_none()
-                if not _existing:
-                    conv_id = None  # fall through to create
+                    _existing = _sr.scalar_one_or_none()
+                    if not _existing:
+                        conv_id = None
+                    elif _existing.source_channel != "agent" and str(_existing.user_id) != str(user_id):
+                        await websocket.send_json({"type": "error", "content": "Not authorized for this session"})
+                        await websocket.close(code=4003)
+                        return
             if not conv_id:
-                # Find most recent session for this user+agent
+                # Prefer the user's designated primary platform session. This keeps agent-initiated
+                # conversations and ongoing long-form context anchored in one stable thread, while
+                # user-created side sessions remain temporary.
                 _sr = await db.execute(
                     _sel(ChatSession)
-                    .where(ChatSession.agent_id == agent_id, ChatSession.user_id == user_id)
+                    .where(
+                        ChatSession.agent_id == agent_id,
+                        ChatSession.user_id == user_id,
+                        ChatSession.source_channel == "web",
+                        ChatSession.is_group.is_(False),
+                        ChatSession.is_primary.is_(True),
+                    )
                     .order_by(ChatSession.last_message_at.desc().nulls_last(), ChatSession.created_at.desc())
                     .limit(1)
                 )
@@ -569,26 +470,19 @@ async def websocket_chat(
                 if _latest:
                     conv_id = str(_latest.id)
                 else:
-                    # Create a default session
-                    now = _dt.now(_tz.utc)
-                    _new_session = ChatSession(
-                        agent_id=agent_id, user_id=user_id,
-                        title=f"Session {now.strftime('%m-%d %H:%M')}",
-                        source_channel="web",
-                        created_at=now,
-                    )
-                    db.add(_new_session)
+                    # Lazily elect or create the primary session only when it is actually needed.
+                    _new_session = await ensure_primary_platform_session(db, agent_id, user_id)
                     await db.commit()
                     await db.refresh(_new_session)
                     conv_id = str(_new_session.id)
-                    logger.info(f"[WS] Created default session {conv_id}")
+                    logger.info(f"[WS] Selected primary session {conv_id}")
 
             try:
                 history_result = await db.execute(
                     select(ChatMessage)
                     .where(ChatMessage.agent_id == agent_id, ChatMessage.conversation_id == conv_id)
                     .order_by(ChatMessage.created_at.desc())
-                    .limit(20)
+                    .limit(ctx_size)
                 )
                 history_messages = list(reversed(history_result.scalars().all()))
                 logger.info(f"[WS] Loaded {len(history_messages)} history messages for session {conv_id}")
@@ -605,14 +499,15 @@ async def websocket_chat(
     agent_id_str = str(agent_id)
     if agent_id_str not in manager.active_connections:
         manager.active_connections[agent_id_str] = []
-    manager.active_connections[agent_id_str].append((websocket, conv_id))
+    manager.active_connections[agent_id_str].append((websocket, conv_id, str(user_id)))
     logger.info(f"[WS] Ready! Agent={agent_name}")
 
+    # Send session_id to frontend so Take Control can reference the correct session.
+    await websocket.send_json({"type": "connected", "session_id": conv_id})
+
     # Build conversation context from history
-    # IMPORTANT: Include tool_call messages so the LLM maintains tool-calling behavior.
-    # Without them, Claude sees user→assistant-text patterns and learns to skip tools.
     conversation: list[dict] = []
-    if not hasattr(websocket, '_hidden_indices'):
+    if not hasattr(websocket, "_hidden_indices"):
         websocket._hidden_indices = set()
     for msg in history_messages:
         if msg.role == "tool_call":
@@ -637,11 +532,13 @@ async def websocket_chat(
                 if tc_data.get("reasoning_content"):
                     asst_msg["reasoning_content"] = tc_data["reasoning_content"]
                 conversation.append(asst_msg)
-                # Tool result message
+                # Tool result message.
+                from app.services.vision_inject import sanitize_history_tool_result
+                sanitized_result = sanitize_history_tool_result(str(tc_result))
                 conversation.append({
                     "role": "tool",
                     "tool_call_id": tc_id,
-                    "content": str(tc_result)[:500],
+                    "content": sanitized_result[:500],
                 })
             except Exception:
                 continue  # Skip malformed tool_call records
@@ -650,7 +547,7 @@ async def websocket_chat(
             if hasattr(msg, 'thinking') and msg.thinking:
                 entry["thinking"] = msg.thinking
             conversation.append(entry)
-            if getattr(msg, 'is_hidden', False):
+            if getattr(msg, "is_hidden", False):
                 websocket._hidden_indices.add(len(conversation) - 1)
 
     try:
@@ -663,7 +560,24 @@ async def websocket_chat(
             data = await websocket.receive_json()
             msg_type = data.get("type", "message")
 
-            # ═══ Branch 1: Edit/retry ═══
+            # Set a unique trace ID for this specific message processing.
+            from app.core.logging_config import set_trace_id
+            import uuid as _trace_uuid
+            trace_id = str(_trace_uuid.uuid4())[:12]
+            set_trace_id(trace_id)
+
+            skip_user_save = False
+            content = data.get("content", "")
+            display_content = data.get("display_content", "")  # User-facing display text
+            file_name = data.get("file_name", "")  # Original file name for attachment display
+            override_model_id = data.get("model_id")  # Optional per-turn model switcher
+            # When the frontend fires an onboarding trigger for a (user, agent)
+            # pair that hasn't met before, it tags the message so the server can
+            # (a) skip persisting a user-side turn and (b) not echo any user
+            # bubble — the agent opens the conversation itself.
+            is_onboarding_trigger = data.get("kind") == "onboarding_trigger"
+            logger.info(f"[WS] Received: {content[:50]}" + (" [onboarding]" if is_onboarding_trigger else ""))
+
             if msg_type == "edit":
                 edit_message_id = data.get("message_id")
                 edit_content = data.get("content", "")
@@ -671,8 +585,9 @@ async def websocket_chat(
                     continue
 
                 from sqlalchemy import select as sa_select
-                async with async_session() as db:
-                    edit_result = await db.execute(
+
+                async with async_session() as edit_db:
+                    edit_result = await edit_db.execute(
                         sa_select(ChatMessage).where(
                             ChatMessage.id == edit_message_id,
                             ChatMessage.conversation_id == conv_id,
@@ -685,8 +600,7 @@ async def websocket_chat(
                         await websocket.send_json({"type": "skill_error", "message": "Message not found"})
                         continue
 
-                    # Delete all messages after the edited one
-                    await db.execute(
+                    await edit_db.execute(
                         ChatMessage.__table__.delete().where(
                             ChatMessage.conversation_id == conv_id,
                             ChatMessage.created_at >= edit_msg.created_at,
@@ -694,84 +608,143 @@ async def websocket_chat(
                         )
                     )
                     edit_msg.content = edit_content
-                    await db.commit()
+                    await edit_db.commit()
 
-                    # Rebuild conversation from DB
-                    rebuild_result = await db.execute(
+                    rebuild_result = await edit_db.execute(
                         sa_select(ChatMessage)
                         .where(ChatMessage.agent_id == agent_id, ChatMessage.conversation_id == conv_id)
                         .order_by(ChatMessage.created_at.asc())
                     )
                     rebuild_msgs = rebuild_result.scalars().all()
-                    conversation.clear()
-                    websocket._hidden_indices = set()
-                    for idx, rmsg in enumerate(rebuild_msgs):
-                        if rmsg.role == "tool_call":
-                            try:
-                                tc_data = json.loads(rmsg.content)
-                                tc_id = f"call_{rmsg.id}"
-                                conversation.append({
-                                    "role": "assistant", "content": None,
-                                    "tool_calls": [{"id": tc_id, "type": "function",
-                                        "function": {"name": tc_data.get("name", "unknown"),
-                                                     "arguments": json.dumps(tc_data.get("args", {}), ensure_ascii=False)}}],
-                                })
-                                conversation.append({"role": "tool", "tool_call_id": tc_id,
-                                                     "content": str(tc_data.get("result", ""))[:500]})
-                            except Exception:
-                                continue
-                        else:
-                            conversation.append({"role": rmsg.role, "content": rmsg.content})
-                            if getattr(rmsg, 'is_hidden', False):
-                                websocket._hidden_indices.add(len(conversation) - 1)
 
-                    await websocket.send_json({"type": "edit_ack", "message_id": str(edit_msg.id)})
+                _rebuild_conversation_from_messages(rebuild_msgs, conversation, websocket)
 
+                await websocket.send_json({"type": "edit_ack", "message_id": str(edit_msg.id)})
                 content = edit_content
                 display_content = ""
                 file_name = ""
                 skip_user_save = True
-                logger.info(f"[WS] Edit applied for message {edit_message_id}")
 
-            # ═══ Branch 2: Normal message ═══
-            else:
-                skip_user_save = False
-                content = data.get("content", "")
+            elif msg_type in {"retry", "regenerate"}:
+                retry_message_id = data.get("message_id")
+                from sqlalchemy import select as sa_select
 
-                # Handle /role:clear
-                if content.strip() == "/role:clear":
-                    async with async_session() as db:
-                        await db.execute(
-                            ChatMessage.__table__.delete().where(
-                                ChatMessage.conversation_id == conv_id,
-                                ChatMessage.is_hidden.is_(True),
-                            )
+                async with async_session() as retry_db:
+                    history_result = await retry_db.execute(
+                        sa_select(ChatMessage)
+                        .where(ChatMessage.agent_id == agent_id, ChatMessage.conversation_id == conv_id)
+                        .order_by(ChatMessage.created_at.asc())
+                    )
+                    persisted_messages = history_result.scalars().all()
+                    retry_anchor = _find_retry_anchor_message(persisted_messages, retry_message_id)
+                    if not retry_anchor:
+                        await websocket.send_json(
+                            {
+                                "type": "skill_error",
+                                "message": "No visible user message found to retry",
+                            }
                         )
-                        await db.commit()
-                    hidden = getattr(websocket, '_hidden_indices', set())
-                    conversation[:] = [m for i, m in enumerate(conversation) if i not in hidden]
-                    websocket._hidden_indices = set()
-                    await websocket.send_json({"type": "skill_loaded", "name": "Roles cleared", "emoji": ""})
-                    continue
+                        continue
 
-                display_content = data.get("display_content", "")  # User-facing display text
-                file_name = data.get("file_name", "")  # Original file name for attachment display
-                logger.info(f"[WS] Received: {content[:50]}")
+                    await retry_db.execute(
+                        ChatMessage.__table__.delete().where(
+                            ChatMessage.conversation_id == conv_id,
+                            ChatMessage.created_at > retry_anchor.created_at,
+                        )
+                    )
+                    await retry_db.commit()
 
-                if not content:
-                    continue
+                    rebuild_result = await retry_db.execute(
+                        sa_select(ChatMessage)
+                        .where(ChatMessage.agent_id == agent_id, ChatMessage.conversation_id == conv_id)
+                        .order_by(ChatMessage.created_at.asc())
+                    )
+                    rebuild_msgs = rebuild_result.scalars().all()
 
-                # Skill prefix parsing — inject hidden context before user message
-                async with async_session() as db:
-                    await _inject_skill_if_matched(content, agent_id, user_id, conv_id, db, conversation, websocket)
+                _rebuild_conversation_from_messages(rebuild_msgs, conversation, websocket)
 
-            # ═══ Shared path: quota checks → save → LLM call ═══
+                await websocket.send_json({"type": "retry_ack", "message_id": str(retry_anchor.id)})
+                content = retry_anchor.content or ""
+                display_content = ""
+                file_name = ""
+                skip_user_save = True
+
+            elif content.strip() == "/role:clear":
+                async with async_session() as clear_db:
+                    await clear_db.execute(
+                        ChatMessage.__table__.delete().where(
+                            ChatMessage.conversation_id == conv_id,
+                            ChatMessage.is_hidden.is_(True),
+                        )
+                    )
+                    await clear_db.commit()
+                hidden = getattr(websocket, "_hidden_indices", set())
+                conversation[:] = [m for i, m in enumerate(conversation) if i not in hidden]
+                websocket._hidden_indices = set()
+                await websocket.send_json({"type": "skill_loaded", "name": "Roles cleared", "emoji": ""})
+                continue
+            else:
+                async with async_session() as skill_db:
+                    await _inject_skill_if_matched(
+                        content,
+                        agent_id,
+                        user_id,
+                        conv_id,
+                        skill_db,
+                        conversation,
+                        websocket,
+                    )
+
+            if not content and not is_onboarding_trigger:
+                continue
+            if is_onboarding_trigger:
+                # Guard against stale triggers. A frontend with a cached
+                # agent query from before the ritual completed can fire an
+                # onboarding_trigger on a new session even though the pair
+                # is already locked. In that case the resolver would return
+                # no prompt, but the placeholder "Please begin the
+                # onboarding" would still reach the LLM and the agent would
+                # dutifully restart the ritual. Short-circuit here, emit an
+                # event so the frontend refreshes its cache, and move on.
+                from app.services.onboarding import is_onboarded as _is_onboarded
+                async with async_session() as _gdb:
+                    if await _is_onboarded(_gdb, agent_id, user_id):
+                        logger.info("[WS] Onboarding trigger ignored — pair already onboarded")
+                        await websocket.send_json({
+                            "type": "onboarded",
+                            "agent_id": str(agent_id),
+                        })
+                        continue
+                # Minimal placeholder so the LLM has a valid user turn to anchor
+                # its greeting. The onboarding system prompt is what actually
+                # drives the reply; this text is never shown or saved.
+                content = "Please begin the onboarding."
+
+            # Per-message model override — the chat dropdown lets users pick a
+            # different tenant-scoped model for this session. Override only the
+            # current turn; nothing is persisted, and it resets when Chat.tsx
+            # remounts.
+            effective_llm_model = llm_model
+            if override_model_id:
+                try:
+                    _ovr_uuid = uuid.UUID(str(override_model_id))
+                    async with async_session() as _mdb:
+                        _mr = await _mdb.execute(select(LLMModel).where(LLMModel.id == _ovr_uuid))
+                        _ovr = _mr.scalar_one_or_none()
+                        if _ovr and _ovr.enabled and _ovr.tenant_id and (
+                            not llm_model or _ovr.tenant_id == llm_model.tenant_id
+                        ):
+                            effective_llm_model = _ovr
+                        else:
+                            logger.warning(f"[WS] model override {override_model_id} rejected (missing/disabled/tenant mismatch)")
+                except (ValueError, TypeError):
+                    logger.warning(f"[WS] model override {override_model_id!r} is not a valid UUID")
 
             # ── Quota checks ──
             try:
                 from app.services.quota_guard import (
                     check_conversation_quota, increment_conversation_usage,
-                    check_agent_expired, check_agent_llm_quota, increment_agent_llm_usage,
+                    check_agent_expired, increment_agent_llm_usage,
                     QuotaExceeded, AgentExpired,
                 )
                 await check_conversation_quota(user_id)
@@ -783,15 +756,43 @@ async def websocket_chat(
                 await websocket.send_json({"type": "done", "role": "assistant", "content": f"⚠️ {ae.message}"})
                 continue
 
-            if not skip_user_save:
-                # Add user message to conversation (full LLM context)
-                conversation.append({"role": "user", "content": content})
+            # Add user message to conversation (full LLM context)
+            conversation.append({"role": "user", "content": content})
 
-                # Save user message — display_content for history display, content for LLM
-                # Prefix with [file:name] if there's a file attachment so history can show it
+            # Save user message to DB.
+            #
+            # Bootstrap trigger: the user never sent anything — the frontend
+            # fired a synthetic turn so the agent could greet first. Don't
+            # persist and don't title the session from it.
+            #
+            # If the LLM content contains [image_data:...] markers, persist the full
+            # payload so subsequent turns can still forward the image to the model.
+            has_image_marker = "[image_data:" in content
+            if has_image_marker:
+                saved_content = f"[file:{file_name}]\n{content}" if file_name else content
+            else:
                 saved_content = display_content if display_content else content
                 if file_name:
                     saved_content = f"[file:{file_name}]\n{saved_content}"
+            user_msg_id: str | None = None
+            if skip_user_save:
+                logger.info("[WS] Edit replay — skipping new user-message persistence")
+            elif is_onboarding_trigger:
+                logger.info("[WS] Onboarding trigger — skipping user-message persistence")
+                # Title this session "Onboarding" up front so it's identifiable
+                # in the session list even before the user has typed anything.
+                # The auto-title logic in the normal path only overwrites titles
+                # that start with "Session ", so this stays sticky.
+                async with async_session() as _sdb:
+                    from app.models.chat_session import ChatSession as _CS
+                    _sr = await _sdb.execute(
+                        select(_CS).where(_CS.id == uuid.UUID(conv_id))
+                    )
+                    _s = _sr.scalar_one_or_none()
+                    if _s and _s.title.startswith("Session "):
+                        _s.title = "Onboarding"
+                        await _sdb.commit()
+            else:
                 async with async_session() as db:
                     user_msg = ChatMessage(
                         agent_id=agent_id,
@@ -820,8 +821,9 @@ async def websocket_chat(
                                 clean_title = f"📎 {file_name}"
                             _sess.title = clean_title[:40] if clean_title else content[:40]
                     await db.commit()
+                    user_msg_id = str(user_msg.id)
                 logger.info("[WS] User message saved")
-                await websocket.send_json({"type": "user_saved", "message_id": str(user_msg.id)})
+                await websocket.send_json({"type": "user_saved", "message_id": user_msg_id})
 
             # ── OpenClaw routing: insert into gateway_messages instead of LLM ──
             if agent_type == "openclaw":
@@ -845,6 +847,7 @@ async def websocket_chat(
                 continue
 
             # Detect task creation intent
+            import re
             task_match = re.search(
                 r'(?:创建|新建|添加|建一个|帮我建|create|add)(?:一个|a )?(?:任务|待办|todo|task)[，,：：:\\s]*(.+)',
                 content, re.IGNORECASE
@@ -853,21 +856,138 @@ async def websocket_chat(
             # Track thinking content for storage (initialize before condition)
             thinking_content = []
 
+            # Reload model config on every message so Settings changes take effect
+            # immediately without requiring a page refresh / WebSocket reconnect.
+            async with async_session() as _mdb:
+                _agent_r = await _mdb.execute(select(Agent).where(Agent.id == agent_id))
+                _agent_cur = _agent_r.scalar_one_or_none()
+                if _agent_cur:
+                    if _agent_cur.primary_model_id:
+                        _m_r = await _mdb.execute(select(LLMModel).where(LLMModel.id == _agent_cur.primary_model_id))
+                        _m = _m_r.scalar_one_or_none()
+                        llm_model = _m if (_m and _m.enabled) else None
+                    else:
+                        llm_model = None
+                    if _agent_cur.fallback_model_id:
+                        _fb_r = await _mdb.execute(select(LLMModel).where(LLMModel.id == _agent_cur.fallback_model_id))
+                        _fb = _fb_r.scalar_one_or_none()
+                        fallback_llm_model = _fb if (_fb and _fb.enabled) else None
+                    else:
+                        fallback_llm_model = None
+                    # Config-level fallback: primary missing → use fallback immediately
+                    if not llm_model and fallback_llm_model:
+                        llm_model = fallback_llm_model
+                        fallback_llm_model = None
+
             # Call LLM with streaming
-            if llm_model:
+            if effective_llm_model:
                 try:
-                    logger.info(f"[WS] Calling LLM {llm_model.model} (streaming)...")
+                    logger.info(f"[WS] Calling LLM {effective_llm_model.model} (streaming)...")
                     
                     # Accumulate partial content for abort handling
                     partial_chunks: list[str] = []
-                    
+
+                    # Set inside _call_with_failover when an onboarding prompt
+                    # was injected for this turn. The first streamed chunk then
+                    # writes the target phase: "greeted" after the hidden
+                    # greeting trigger, "completed" after the first real
+                    # calibration reply.
+                    needs_onboarding_mark = False
+                    onboarding_target_phase = "completed"
+                    onboarding_mark_done = False
+
+                    async def maybe_mark_onboarding_progress():
+                        nonlocal onboarding_mark_done
+                        if needs_onboarding_mark and not onboarding_mark_done:
+                            onboarding_mark_done = True
+                            try:
+                                from app.services.onboarding import mark_onboarding_phase
+                                async with async_session() as _ob_db:
+                                    await mark_onboarding_phase(
+                                        _ob_db,
+                                        agent_id,
+                                        user_id,
+                                        onboarding_target_phase,
+                                    )
+                                # Tell the frontend to refresh its cached agent
+                                # record so subsequent sessions (or other open
+                                # tabs) see onboarded_for_me=true and skip the
+                                # kickoff effect.
+                                await websocket.send_json({
+                                    "type": "onboarded",
+                                    "agent_id": str(agent_id),
+                                })
+                            except Exception as _ob_err:
+                                logger.warning(f"[WS] mark_onboarded failed (non-fatal): {_ob_err}")
+
                     async def stream_to_ws(text: str):
                         """Send each chunk to client in real-time."""
                         partial_chunks.append(text)
                         await websocket.send_json({"type": "chunk", "content": text})
+                        await maybe_mark_onboarding_progress()
                     
                     async def tool_call_to_ws(data: dict):
                         """Send tool call info to client and persist completed ones."""
+                        if data.get("status") in {"running", "done"}:
+                            await maybe_mark_onboarding_progress()
+                        if data.get("status") == "done":
+                            try:
+                                from app.services.agentbay_live import detect_agentbay_env, get_desktop_screenshot, get_browser_snapshot
+
+                                tool_name = data.get("name", "")
+                                env = detect_agentbay_env(tool_name)
+                                if env == "desktop":
+                                    b64_url = await get_desktop_screenshot(agent_id, session_id=conv_id)
+                                    if b64_url:
+                                        data["live_preview"] = {"env": env, "screenshot_url": b64_url}
+                                        logger.info(f"[WS][LivePreview] Embedded {env} base64 in tool_call")
+                                elif env == "browser":
+                                    b64_url = await get_browser_snapshot(agent_id, session_id=conv_id)
+                                    if b64_url:
+                                        data["live_preview"] = {"env": env, "screenshot_url": b64_url}
+                                        logger.info(f"[WS][LivePreview] Embedded {env} base64 in tool_call")
+                                elif env == "code":
+                                    tool_result = data.get("result", "") or ""
+                                    data["live_preview"] = {"env": "code", "output": tool_result[:5000]}
+                            except Exception as _lp_err:
+                                logger.warning(f"[WS][LivePreview] Embed failed: {_lp_err}")
+
+                            # Attach workspace_activity so the frontend WorkspaceOperationPanel
+                            # auto-opens when the agent writes, edits, or converts a file.
+                            # PR #419 added the frontend logic but the backend never emitted
+                            # this event — this is the missing piece.
+                            _WORKSPACE_TOOL_ACTIONS: dict[str, str] = {
+                                "write_file": "write",
+                                "edit_file": "edit",
+                                "move_file": "move",
+                                "delete_file": "delete",
+                                "convert_markdown_to_docx": "convert",
+                                "convert_csv_to_xlsx": "convert",
+                                "convert_markdown_to_pdf": "convert",
+                                "convert_html_to_pdf": "convert",
+                                "convert_html_to_pptx": "convert",
+                            }
+                            _done_tool_name = data.get("name", "")
+                            if _done_tool_name in _WORKSPACE_TOOL_ACTIONS:
+                                _ws_args = data.get("args") or {}
+                                if isinstance(_ws_args, str):
+                                    try:
+                                        import json as _json_wsa
+                                        _ws_args = _json_wsa.loads(_ws_args)
+                                    except Exception:
+                                        _ws_args = {}
+                                _ws_path = _ws_args.get("output_path") or _ws_args.get("destination_path") or _ws_args.get("path", "")
+                                _ws_result = str(data.get("result") or "")
+                                _pending_approval = "requires approval" in _ws_result.lower()
+                                data["workspace_activity"] = {
+                                    "action": _WORKSPACE_TOOL_ACTIONS[_done_tool_name],
+                                    "path": _ws_path,
+                                    "tool": _done_tool_name,
+                                    "ok": not _pending_approval,
+                                    "pendingApproval": _pending_approval,
+                                }
+                                logger.info(f"[WS][Workspace] activity: {_done_tool_name} → {_ws_path}")
+
                         await websocket.send_json({"type": "tool_call", **data})
                         # Save completed tool calls to DB so they persist in chat history
                         if data.get("status") == "done":
@@ -888,6 +1008,12 @@ async def websocket_chat(
                                         conversation_id=conv_id,
                                     )
                                     _tc_db.add(tc_msg)
+                                    await maybe_mark_session_read_for_active_viewer(
+                                        _tc_db,
+                                        agent_id=agent_id,
+                                        session_id=conv_id,
+                                        user_id=user_id,
+                                    )
                                     await _tc_db.commit()
                             except Exception as _tc_err:
                                 logger.warning(f"[WS] Failed to save tool_call: {_tc_err}")
@@ -900,21 +1026,108 @@ async def websocket_chat(
                         thinking_content.append(text)
                         await websocket.send_json({"type": "thinking", "content": text})
 
+                    _workspace_draft_cache: dict[str, str] = {}
+
+                    async def tool_delta_to_ws(data: dict):
+                        """Stream workspace file-operation drafts while tool args are still arriving."""
+                        tool_name = data.get("name", "")
+                        if tool_name not in {
+                            "write_file",
+                            "edit_file",
+                            "move_file",
+                            "delete_file",
+                            "convert_markdown_to_docx",
+                            "convert_csv_to_xlsx",
+                            "convert_markdown_to_pdf",
+                            "convert_html_to_pdf",
+                            "convert_html_to_pptx",
+                        }:
+                            return
+
+                        raw_args = data.get("arguments", "")
+                        if isinstance(raw_args, (dict, list)):
+                            raw_args = json.dumps(raw_args, ensure_ascii=False)
+                        elif raw_args is None:
+                            raw_args = ""
+                        else:
+                            raw_args = str(raw_args)
+
+                        draft_id = str(data.get("id") or f"draft-{data.get('index', 0)}")
+                        if _workspace_draft_cache.get(draft_id) == raw_args:
+                            return
+                        _workspace_draft_cache[draft_id] = raw_args
+
+                        await websocket.send_json(
+                            {
+                                "type": "workspace_draft",
+                                "id": draft_id,
+                                "index": data.get("index", 0),
+                                "name": tool_name,
+                                "arguments": raw_args,
+                            }
+                        )
+
                     import asyncio as _aio
 
-                    # Run call_llm as a cancellable task
-                    llm_task = _aio.create_task(call_llm(
-                        llm_model,
-                        conversation[-ctx_size:],
-                        agent_name,
-                        role_description,
-                        agent_id=agent_id,
-                        user_id=user_id,
-                        on_chunk=stream_to_ws,
-                        on_tool_call=tool_call_to_ws,
-                        on_thinking=thinking_to_ws,
-                        supports_vision=getattr(llm_model, 'supports_vision', False),
-                    ))
+                    # Run call_llm_with_failover as a cancellable task
+                    async def _call_with_failover():
+                        nonlocal needs_onboarding_mark, onboarding_target_phase
+
+                        async def _on_failover(reason: str):
+                            await websocket.send_json({"type": "info", "content": f"Primary model error, {reason}"})
+
+                        # To prevent tool call message pairs(assistant + tool) from being broken down.
+                        _truncated = conversation[-ctx_size:]
+                        while _truncated and _truncated[0].get("role") == "tool":
+                            _truncated.pop(0)
+
+                        # Per-(user, agent) onboarding. With no row, prepend the
+                        # greeting prompt and mark the pair as "greeted" once it
+                        # starts streaming. With phase="greeted", prepend the
+                        # configuration prompt to the user's first real reply
+                        # and mark the pair as "completed" once that reply
+                        # starts streaming.
+                        from app.services.onboarding import resolve_onboarding_prompt
+                        skip_tools_for_greeting = False
+                        try:
+                            async with async_session() as _ob_db:
+                                _onb = await resolve_onboarding_prompt(
+                                    _ob_db, agent_snapshot, user_id,
+                                    user_name=user_display_name,
+                                    user_locale=lang,
+                                )
+                            if _onb:
+                                _truncated = [{"role": "system", "content": _onb.prompt}] + _truncated
+                                if _onb.lock_on_first_chunk:
+                                    needs_onboarding_mark = True
+                                    onboarding_target_phase = _onb.target_phase
+                                # Greeting turn produces a templated reply that
+                                # never calls tools, so suppress the tool list
+                                # to cut prompt size by ~50% and improve TTFT.
+                                if _onb.is_greeting_turn:
+                                    skip_tools_for_greeting = True
+                        except Exception as _onb_err:
+                            logger.warning(f"[WS] Onboarding prompt resolve failed (non-fatal): {_onb_err}")
+
+                        return await call_llm_with_failover(
+                            primary_model=effective_llm_model,
+                            fallback_model=fallback_llm_model,
+                            messages=_truncated,
+                            agent_name=agent_name,
+                            role_description=role_description,
+                            agent_id=agent_id,
+                            user_id=user_id,
+                            session_id=conv_id,
+                            on_chunk=stream_to_ws,
+                            on_tool_call=tool_call_to_ws,
+                            on_tool_delta=tool_delta_to_ws,
+                            on_thinking=thinking_to_ws,
+                            supports_vision=getattr(effective_llm_model, 'supports_vision', False),
+                            on_failover=_on_failover,
+                            skip_tools=skip_tools_for_greeting,
+                        )
+
+                    llm_task = _aio.create_task(_call_with_failover())
 
                     # Listen for abort while LLM is running
                     aborted = False
@@ -925,7 +1138,7 @@ async def websocket_chat(
                                 websocket.receive_json(), timeout=0.5
                             )
                             if msg.get("type") == "abort":
-                                logger.info(f"[WS] Abort received, cancelling LLM task")
+                                logger.info("[WS] Abort received, cancelling LLM task")
                                 llm_task.cancel()
                                 aborted = True
                                 break
@@ -954,7 +1167,17 @@ async def websocket_chat(
                         assistant_response = await llm_task
                         logger.info(f"[WS] LLM response: {assistant_response[:80]}")
 
-                    # Update last_active_at
+                    # call_llm returns error strings instead of raising — detect and
+                    # re-raise so the fallback model logic below can trigger correctly.
+                    _LLM_ERROR_PREFIXES = ("[LLM Error]", "[LLM call error]", "[Error]")
+                    if not aborted and assistant_response and any(
+                        assistant_response.startswith(p) for p in _LLM_ERROR_PREFIXES
+                    ):
+                        raise RuntimeError(assistant_response)
+
+                    # Update last_active_at. The onboarding lock is handled
+                    # earlier in stream_to_ws on the first streamed chunk, so
+                    # there's nothing to reconcile here anymore.
                     from datetime import datetime, timezone as tz
                     async with async_session() as _db:
                         from app.models.agent import Agent as AgentModel
@@ -980,30 +1203,7 @@ async def websocket_chat(
                     logger.error(f"[WS] LLM error: {e}")
                     import traceback
                     traceback.print_exc()
-                    # Runtime fallback: primary model failed -> retry with fallback model
-                    if fallback_llm_model:
-                        logger.info(f"[WS] Primary model failed, retrying with fallback: {fallback_llm_model.model}")
-                        try:
-                            await websocket.send_json({"type": "info", "content": f"Primary model error, switching to fallback model ({fallback_llm_model.model})..."})
-                            assistant_response = await call_llm(
-                                fallback_llm_model,
-                                conversation[-ctx_size:],
-                                agent_name,
-                                role_description,
-                                agent_id=agent_id,
-                                user_id=user_id,
-                                on_chunk=stream_to_ws,
-                                on_tool_call=tool_call_to_ws,
-                                on_thinking=thinking_to_ws,
-                                supports_vision=getattr(fallback_llm_model, 'supports_vision', False),
-                            )
-                            logger.info(f"[WS] Fallback LLM response: {assistant_response[:80]}")
-                        except Exception as e2:
-                            logger.error(f"[WS] Fallback LLM also failed: {e2}")
-                            traceback.print_exc()
-                            assistant_response = f"[LLM call error] Primary: {str(e)[:100]} | Fallback: {str(e2)[:100]}"
-                    else:
-                        assistant_response = f"[LLM call error] {str(e)[:200]}"
+                    assistant_response = f"[LLM call error] {str(e)[:200]}"
             else:
                 assistant_response = f"⚠️ {agent_name} has no LLM model configured. Please select a model in the agent's Settings tab."
 
@@ -1026,79 +1226,90 @@ async def websocket_chat(
                             db.add(task)
                             await db.commit()
                             await db.refresh(task)
+                            logger.info(f"[WS] Task created: {task.id}")
+                            # Trigger background execution
                             task_id = task.id
                         _asyncio.create_task(execute_task(task_id, agent_id))
                         assistant_response += f"\n\n📋 Task synced to task board: [{task_title}]"
-                        logger.info(f"[WS] Created task: {task_title}")
-                    except Exception as e:
-                        logger.error(f"[WS] Failed to create task: {e}")
+                    except Exception as te:
+                        logger.error(f"[WS] Task creation failed: {te}")
 
-            # Add assistant response to conversation
+            # Add assistant response to in-memory conversation for subsequent turns.
             conversation.append({"role": "assistant", "content": assistant_response})
 
-            # Save assistant message
+            # Save assistant reply
             async with async_session() as db:
-                asst_msg = ChatMessage(
+                assistant_msg = ChatMessage(
                     agent_id=agent_id,
                     user_id=user_id,
                     role="assistant",
                     content=assistant_response,
-                    thinking=''.join(thinking_content) if thinking_content else None,
                     conversation_id=conv_id,
+                    thinking="".join(thinking_content) if thinking_content else None,
                 )
-                db.add(asst_msg)
+                db.add(assistant_msg)
+                await maybe_mark_session_read_for_active_viewer(
+                    db,
+                    agent_id=agent_id,
+                    session_id=conv_id,
+                    user_id=user_id,
+                )
                 await db.commit()
+                assistant_msg_id = str(assistant_msg.id)
             logger.info("[WS] Assistant message saved")
 
-            # Send done signal with final content (for non-streaming clients)
-            await websocket.send_json({
-                "type": "done",
-                "role": "assistant",
-                "content": assistant_response,
-                "message_id": str(asst_msg.id),
-            })
-            logger.info("[WS] Response done sent to client")
-
-            # ── Auto-generate session title on first exchange ──
-            if not history_messages and _tenant_id:
+            if not history_messages and not is_onboarding_trigger:
                 try:
-                    from app.models.tenant import Tenant as _Tenant
-                    from app.models.llm import LLMModel as _LLM
-                    import asyncio as _asyncio
-                    async with async_session() as _tdb:
-                        _t_r = await _tdb.execute(
-                            select(_Tenant).where(_Tenant.id == _tenant_id)
-                        )
-                        _tenant = _t_r.scalar_one_or_none()
-                        if _tenant and _tenant.utility_model_id:
-                            _m_r = await _tdb.execute(
-                                select(_LLM).where(_LLM.id == _tenant.utility_model_id)
-                            )
-                            _util_model = _m_r.scalar_one_or_none()
-                            if _util_model:
-                                from app.services.session_title import generate_session_title
-                                _first_user_msg = display_content if display_content else content
-                                _asyncio.create_task(
-                                    generate_session_title(
-                                        session_id=conv_id,
-                                        user_message=_first_user_msg,
-                                        assistant_response=assistant_response[:500],
-                                        utility_model=_util_model,
-                                        websocket=websocket,
-                                    )
+                    tenant_id = getattr(effective_llm_model, "tenant_id", None) or getattr(llm_model, "tenant_id", None)
+                    if tenant_id:
+                        from app.models.tenant import Tenant as _Tenant
+                        from app.models.llm import LLMModel as _UtilityLLM
+                        from app.services.session_title import generate_session_title
+                        import asyncio as _asyncio_title
+
+                        async with async_session() as title_db:
+                            tenant_result = await title_db.execute(select(_Tenant).where(_Tenant.id == tenant_id))
+                            tenant = tenant_result.scalar_one_or_none()
+                            utility_model = None
+                            if tenant and tenant.utility_model_id:
+                                utility_result = await title_db.execute(
+                                    select(_UtilityLLM).where(_UtilityLLM.id == tenant.utility_model_id)
                                 )
-                except Exception as _e:
-                    logger.warning(f"[WS] Title generation trigger failed: {_e}")
+                                utility_model = utility_result.scalar_one_or_none()
+
+                        if utility_model:
+                            _asyncio_title.create_task(
+                                generate_session_title(
+                                    conv_id,
+                                    display_content if display_content else content,
+                                    assistant_response,
+                                    utility_model,
+                                    websocket,
+                                )
+                            )
+                except Exception as title_err:
+                    logger.warning(f"[WS] Session title scheduling failed: {title_err}")
+
+            # Final 'done' packet
+            await websocket.send_json(
+                {
+                    "type": "done",
+                    "role": "assistant",
+                    "content": assistant_response,
+                    "message_id": assistant_msg_id,
+                }
+            )
+
+            # Re-process any queued messages (if user sent something during generation)
+            for qm in queued_messages:
+                # In a real implementation, you might want to push these back to the main loop
+                pass
 
     except WebSocketDisconnect:
-        logger.info(f"[WS] Client disconnected: {agent_name}")
-        manager.disconnect(agent_id_str, websocket)
+        logger.info(f"[WS] Client disconnected: {user_id}")
+        manager.disconnect(str(agent_id), websocket)
     except Exception as e:
-        logger.error(f"[WS] Error in message loop: {type(e).__name__}: {e}")
+        logger.error(f"[WS] Unexpected error: {e}")
         import traceback
         traceback.print_exc()
-        manager.disconnect(agent_id_str, websocket)
-        try:
-            await websocket.close(code=1011)
-        except Exception:
-            pass
+        manager.disconnect(str(agent_id), websocket)

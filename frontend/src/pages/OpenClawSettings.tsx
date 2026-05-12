@@ -3,7 +3,7 @@ import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useTranslation } from 'react-i18next';
 import { useNavigate } from 'react-router-dom';
 import { agentApi } from '../services/api';
-
+import LinearCopyButton from '../components/LinearCopyButton';
 function fetchAuth<T>(url: string, options?: RequestInit): Promise<T> {
     const token = localStorage.getItem('token');
     return fetch(`/api${url}`, {
@@ -27,8 +27,6 @@ export default function OpenClawSettings({ agent, agentId }: OpenClawSettingsPro
     const [apiKey, setApiKey] = useState<string | null>(null);
     const [regenerating, setRegenerating] = useState(false);
     const [showConfirm, setShowConfirm] = useState(false);
-    const [copied, setCopied] = useState(false);
-
     // ─── Delete state ───────────────────────────────────
     const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
     const [deleting, setDeleting] = useState(false);
@@ -44,21 +42,17 @@ export default function OpenClawSettings({ agent, agentId }: OpenClawSettingsPro
             // Refresh agent data so has_api_key updates
             queryClient.invalidateQueries({ queryKey: ['agent', agentId] });
             if (autoCopy) {
-                handleCopy(result.api_key);
+                try {
+                    await navigator.clipboard.writeText(result.api_key);
+                } catch (err) {
+                    console.error('Failed to auto-copy to clipboard:', err);
+                }
             }
         } catch (e) {
             console.error('Failed to regenerate API key', e);
         } finally {
             setRegenerating(false);
         }
-    };
-
-    const handleCopy = async (text: string) => {
-        try {
-            await navigator.clipboard.writeText(text);
-            setCopied(true);
-            setTimeout(() => setCopied(false), 2000);
-        } catch { }
     };
 
     const handleDelete = async () => {
@@ -109,7 +103,7 @@ export default function OpenClawSettings({ agent, agentId }: OpenClawSettingsPro
     };
 
     const isOwner = permData?.is_owner ?? false;
-    const currentScope = permData?.scope_type || 'company';
+    const currentScope = permData?.scope_type === 'user' ? 'private' : (permData?.scope_type || 'company');
     const currentAccessLevel = permData?.access_level || 'use';
 
     return (
@@ -145,13 +139,13 @@ export default function OpenClawSettings({ agent, agentId }: OpenClawSettingsPro
                                 }}>
                                     {activeKey}
                                 </code>
-                                <button
+                                <LinearCopyButton
                                     className="btn btn-secondary"
-                                    onClick={() => handleCopy(activeKey)}
-                                    style={{ padding: '4px 12px', fontSize: '12px', whiteSpace: 'nowrap' }}
-                                >
-                                    {copied ? 'Copied' : 'Copy'}
-                                </button>
+                                    textToCopy={activeKey}
+                                    label="Copy"
+                                    copiedLabel="Copied"
+                                    style={{ padding: '4px 12px', fontSize: '12px', whiteSpace: 'nowrap', minWidth: '70px', height: 'fit-content' }}
+                                />
                                 <button
                                     className="btn btn-secondary"
                                     onClick={() => setShowConfirm(true)}
@@ -243,7 +237,7 @@ export default function OpenClawSettings({ agent, agentId }: OpenClawSettingsPro
 
                 {/* Scope Selection */}
                 <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', marginBottom: '16px' }}>
-                    {(['company', 'user'] as const).map((scope) => (
+                    {(['company', 'private', 'custom'] as const).map((scope) => (
                         <label
                             key={scope}
                             style={{
@@ -272,11 +266,14 @@ export default function OpenClawSettings({ agent, agentId }: OpenClawSettingsPro
                                 <div style={{ fontWeight: 500, fontSize: '13px' }}>
                                     {scope === 'company'
                                         ? t('agent.settings.perm.companyWide', 'Company-wide')
-                                        : t('agent.settings.perm.onlyMe', 'Only Me')}
+                                        : scope === 'private'
+                                            ? t('agent.settings.perm.onlyMe', 'Only Me')
+                                            : t('agent.settings.perm.custom', 'Custom')}
                                 </div>
                                 <div style={{ fontSize: '11px', color: 'var(--text-tertiary)', marginTop: '2px' }}>
                                     {scope === 'company' && t('agent.settings.perm.companyWideDesc', 'All users in the organization can use this agent')}
-                                    {scope === 'user' && t('agent.settings.perm.onlyMeDesc', 'Only the creator can use this agent')}
+                                    {scope === 'private' && t('agent.settings.perm.onlyMeDesc', 'Only the creator can use this agent')}
+                                    {scope === 'custom' && t('agent.settings.perm.customDesc', 'Start private, then choose platform users in Settings')}
                                 </div>
                             </div>
                         </label>

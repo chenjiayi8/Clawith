@@ -1,21 +1,26 @@
 import { useState, useEffect } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useLocation, useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { agentApi, channelApi, enterpriseApi, skillApi } from '../services/api';
+import { IconEye, IconSettings, IconTools } from '@tabler/icons-react';
+import { agentApi, channelApi, enterpriseApi, skillApi, tenantApi } from '../services/api';
 import ChannelConfig from '../components/ChannelConfig';
-
+import LinearCopyButton from '../components/LinearCopyButton';
 const STEPS = ['basicInfo', 'personality', 'skills', 'permissions', 'channel'] as const;
 const OPENCLAW_STEPS = ['basicInfo', 'permissions'] as const;
 
 export default function AgentCreate() {
     const { t } = useTranslation();
     const navigate = useNavigate();
+    const location = useLocation();
     const queryClient = useQueryClient();
     const [step, setStep] = useState(0);
     const [error, setError] = useState('');
     const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
-    const [agentType, setAgentType] = useState<'native' | 'openclaw'>('native');
+    const [agentType, setAgentType] = useState<'native' | 'openclaw'>(() => {
+        const params = new URLSearchParams(location.search);
+        return params.get('type') === 'openclaw' ? 'openclaw' : 'native';
+    });
     // Clear field error when user edits a field
     const clearFieldError = (field: string) => setFieldErrors(prev => { const n = { ...prev }; delete n[field]; return n; });
     const [createdApiKey, setCreatedApiKey] = useState('');
@@ -31,7 +36,6 @@ export default function AgentCreate() {
         fallback_model_id: '' as string,
         permission_scope_type: 'company',
         permission_access_level: 'use',
-        template_id: '' as string,
         max_tokens_per_day: '',
         max_tokens_per_month: '',
         skill_ids: [] as string[],
@@ -44,11 +48,21 @@ export default function AgentCreate() {
         queryFn: enterpriseApi.llmModels,
     });
 
-    // Fetch templates
-    const { data: templates = [] } = useQuery({
-        queryKey: ['templates'],
-        queryFn: enterpriseApi.templates,
+    // Tenant default model — used to preselect the model step so the open-source
+    // default ("hire and go") path needs no clicks. User can override.
+    const { data: myTenant } = useQuery({
+        queryKey: ['tenant', 'me'],
+        queryFn: () => tenantApi.me(),
+        staleTime: 5 * 60 * 1000,
     });
+    useEffect(() => {
+        if (!myTenant?.default_model_id) return;
+        const enabledModels = (models as any[]).filter((m: any) => m.enabled);
+        const exists = enabledModels.some((m: any) => m.id === myTenant.default_model_id);
+        if (exists) {
+            setForm(prev => prev.primary_model_id ? prev : { ...prev, primary_model_id: myTenant.default_model_id! });
+        }
+    }, [myTenant?.default_model_id, models]);
 
     // Fetch global skills for step 3
     const { data: globalSkills = [] } = useQuery({
@@ -208,7 +222,6 @@ export default function AgentCreate() {
             boundaries: agentType === 'native' ? form.boundaries : undefined,
             primary_model_id: agentType === 'native' ? (form.primary_model_id || undefined) : undefined,
             fallback_model_id: agentType === 'native' ? (form.fallback_model_id || undefined) : undefined,
-            template_id: form.template_id || undefined,
             permission_scope_type: form.permission_scope_type,
             max_tokens_per_day: form.max_tokens_per_day ? Number(form.max_tokens_per_day) : undefined,
             max_tokens_per_month: form.max_tokens_per_month ? Number(form.max_tokens_per_month) : undefined,
@@ -304,13 +317,14 @@ To proactively contact a person or agent, make an HTTP POST request:
 
 The system auto-detects the best channel. For agents, the reply appears in your next poll.
 For humans, the message is delivered via their available channel (e.g. Feishu).`}</pre>
-                            <button className="btn btn-ghost" style={{ position: 'absolute', top: '4px', right: '4px', fontSize: '11px' }}
-                                onClick={() => {
-                                    const text = `Please create a skill file at skills/clawith_sync.md with the following content, then add "Check Clawith inbox using the clawith_sync skill and process any pending messages" to your HEARTBEAT.md:\n\n---\nname: clawith_sync\ndescription: Sync with Clawith platform — check inbox, submit results, and send messages.\n---\n\n# Clawith Sync\n\n## When to use\nCheck for new messages from the Clawith platform during every heartbeat cycle.\nYou can also proactively send messages to people and agents in your relationships.\n\n## Instructions\n\n### 1. Check inbox\nMake an HTTP GET request:\n- URL: ${window.location.origin}/api/gateway/poll\n- Header: X-Api-Key: ${createdApiKey}\n\nThe response contains a \`messages\` array. Each message includes:\n- \`id\` — unique message ID (use this for reporting)\n- \`content\` — the message text\n- \`sender_user_name\` — name of the Clawith user who sent it\n- \`sender_user_id\` — unique ID of the sender\n- \`conversation_id\` — the conversation this message belongs to\n- \`history\` — array of previous messages in this conversation for context\n\nThe response also contains a \`relationships\` array describing your colleagues:\n- \`name\` — the person or agent name\n- \`type\` — "human" or "agent"\n- \`role\` — relationship type (e.g. collaborator, supervisor)\n- \`channels\` — available communication channels (e.g. ["feishu"], ["agent"])\n\n**IMPORTANT**: Use the \`history\` array to understand conversation context before replying.\nDifferent \`sender_user_name\` values mean different people — address them accordingly.\n\n### 2. Report results\nFor each completed message, make an HTTP POST request:\n- URL: ${window.location.origin}/api/gateway/report\n- Header: X-Api-Key: ${createdApiKey}\n- Header: Content-Type: application/json\n- Body: {"message_id": "<id from the message>", "result": "<your response>"}\n\n### 3. Send a message to someone\nTo proactively contact a person or agent, make an HTTP POST request:\n- URL: ${window.location.origin}/api/gateway/send-message\n- Header: X-Api-Key: ${createdApiKey}\n- Header: Content-Type: application/json\n- Body: {"target": "<name of person or agent>", "content": "<your message>"}\n\nThe system auto-detects the best channel. For agents, the reply appears in your next poll.\nFor humans, the message is delivered via their available channel (e.g. Feishu).`;
-                                    navigator.clipboard.writeText(text);
-                                }}
-                            >{t('common.copy', 'Copy')}</button>
-                        </div>
+                                    <LinearCopyButton
+                                        className="btn btn-ghost"
+                                        style={{ position: 'absolute', top: '4px', right: '4px', fontSize: '11px', minWidth: '60px' }}
+                                        textToCopy={`Please create a skill file at skills/clawith_sync.md with the following content, then add "Check Clawith inbox using the clawith_sync skill and process any pending messages" to your HEARTBEAT.md:\n\n---\nname: clawith_sync\ndescription: Sync with Clawith platform — check inbox, submit results, and send messages.\n---\n\n# Clawith Sync\n\n## When to use\nCheck for new messages from the Clawith platform during every heartbeat cycle.\nYou can also proactively send messages to people and agents in your relationships.\n\n## Instructions\n\n### 1. Check inbox\nMake an HTTP GET request:\n- URL: ${window.location.origin}/api/gateway/poll\n- Header: X-Api-Key: ${createdApiKey}\n\nThe response contains a \`messages\` array. Each message includes:\n- \`id\` — unique message ID (use this for reporting)\n- \`content\` — the message text\n- \`sender_user_name\` — name of the Clawith user who sent it\n- \`sender_user_id\` — unique ID of the sender\n- \`conversation_id\` — the conversation this message belongs to\n- \`history\` — array of previous messages in this conversation for context\n\nThe response also contains a \`relationships\` array describing your colleagues:\n- \`name\` — the person or agent name\n- \`type\` — "human" or "agent"\n- \`role\` — relationship type (e.g. collaborator, supervisor)\n- \`channels\` — available communication channels (e.g. ["feishu"], ["agent"])\n\n**IMPORTANT**: Use the \`history\` array to understand conversation context before replying.\nDifferent \`sender_user_name\` values mean different people — address them accordingly.\n\n### 2. Report results\nFor each completed message, make an HTTP POST request:\n- URL: ${window.location.origin}/api/gateway/report\n- Header: X-Api-Key: ${createdApiKey}\n- Header: Content-Type: application/json\n- Body: {"message_id": "<id from the message>", "result": "<your response>"}\n\n### 3. Send a message to someone\nTo proactively contact a person or agent, make an HTTP POST request:\n- URL: ${window.location.origin}/api/gateway/send-message\n- Header: X-Api-Key: ${createdApiKey}\n- Header: Content-Type: application/json\n- Body: {"target": "<name of person or agent>", "content": "<your message>"}\n\nThe system auto-detects the best channel. For agents, the reply appears in your next poll.\nFor humans, the message is delivered via their available channel (e.g. Feishu).`}
+                                        label={t('common.copy', 'Copy')}
+                                        copiedLabel="Copied"
+                                    />
+                                </div>
                     </div>
 
                     {/* API Key — collapsed by default */}
@@ -325,9 +339,13 @@ For humans, the message is delivered via their available channel (e.g. Feishu).`
                                     fontSize: '13px', fontFamily: 'monospace', wordBreak: 'break-all',
                                     border: '1px solid var(--border-default)',
                                 }}>{createdApiKey}</code>
-                                <button className="btn btn-secondary" onClick={() => navigator.clipboard.writeText(createdApiKey)}>
-                                    {t('common.copy', 'Copy')}
-                                </button>
+                                <LinearCopyButton
+                                    className="btn btn-secondary"
+                                    style={{ fontSize: '11px', padding: '4px 12px', minWidth: '70px', height: 'fit-content' }}
+                                    textToCopy={createdApiKey}
+                                    label={t('common.copy', 'Copy')}
+                                    copiedLabel="Copied"
+                                />
                             </div>
                             <p style={{ fontSize: '11px', color: 'var(--text-tertiary)', marginTop: '6px' }}>
                                 {t('openclaw.keyNote', 'This key is already embedded in the instruction above. Save it separately if needed for manual configuration.')}
@@ -427,6 +445,7 @@ For humans, the message is delivered via their available channel (e.g. Feishu).`
                             {[
                                 { value: 'company', label: t('wizard.step4.companyWide'), desc: t('wizard.step4.companyWideDesc') },
                                 { value: 'user', label: t('wizard.step4.selfOnly'), desc: t('wizard.step4.selfOnlyDesc') },
+                                { value: 'custom', label: t('agent.settings.perm.custom', 'Custom'), desc: t('agent.settings.perm.customDesc', 'Start private, then choose platform users in Settings') },
                             ].map((scope) => (
                                 <label key={scope.value} style={{
                                     flex: 1, display: 'flex', alignItems: 'center', gap: '10px', padding: '12px',
@@ -480,23 +499,7 @@ For humans, the message is delivered via their available channel (e.g. Feishu).`
                 ))}
             </div>
 
-            {/* Navigation — sticky between stepper and card */}
-            <div style={{ display: 'flex', justifyContent: 'space-between', maxWidth: '640px', marginBottom: '16px', position: 'sticky', top: 0, zIndex: 10, background: 'var(--bg-primary)', paddingTop: '4px', paddingBottom: '4px' }}>
-                <button className="btn btn-secondary" onClick={() => step > 0 ? setStep(step - 1) : navigate('/')}
-                    disabled={createMutation.isPending}>
-                    {step === 0 ? t('common.cancel') : t('wizard.prev')}
-                </button>
-                {step < STEPS.length - 1 ? (
-                    <button className="btn btn-primary" onClick={handleNext}>
-                        {t('wizard.next')} →
-                    </button>
-                ) : (
-                    <button className="btn btn-primary" onClick={handleFinish}
-                        disabled={createMutation.isPending}>
-                        {createMutation.isPending ? t('common.loading') : t('wizard.finish')}
-                    </button>
-                )}
-            </div>
+            {/* Removed top navigation, moved to bottom */}
 
             {error && (
                 <div style={{ background: 'var(--error-subtle)', color: 'var(--error)', padding: '8px 12px', borderRadius: '6px', fontSize: '13px', marginBottom: '16px' }}>
@@ -509,67 +512,6 @@ For humans, the message is delivered via their available channel (e.g. Feishu).`
                 {step === 0 && (
                     <div>
                         <h3 style={{ marginBottom: '20px', fontWeight: 600, fontSize: '15px' }}>{t('wizard.step1.title')}</h3>
-
-                        {/* Template selector */}
-                        {templates.length > 0 && (
-                            <div className="form-group">
-                                <label className="form-label">{t('wizard.step1.selectTemplate')}</label>
-                                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '8px' }}>
-                                    <div
-                                        onClick={() => setForm({ ...form, template_id: '' })}
-                                        style={{
-                                            padding: '12px', borderRadius: '8px', cursor: 'pointer', textAlign: 'center',
-                                            border: `1px solid ${!form.template_id ? 'var(--accent-primary)' : 'var(--border-default)'}`,
-                                            background: !form.template_id ? 'var(--accent-subtle)' : 'var(--bg-elevated)',
-                                        }}
-                                    >
-                                        <div style={{ fontSize: '13px', fontWeight: 500, color: 'var(--text-secondary)' }}>{t('wizard.step1.custom')}</div>
-                                        <div style={{ fontSize: '12px', marginTop: '4px' }}>{t('wizard.step1.custom')}</div>
-                                    </div>
-                                    {templates.map((tmpl: any) => (
-                                        <div
-                                            key={tmpl.id}
-                                            onClick={() => setForm({ ...form, template_id: tmpl.id, role_description: tmpl.description })}
-                                            style={{
-                                                padding: '12px', borderRadius: '8px', cursor: 'pointer', textAlign: 'center',
-                                                border: `1px solid ${form.template_id === tmpl.id ? 'var(--accent-primary)' : 'var(--border-default)'}`,
-                                                background: form.template_id === tmpl.id ? 'var(--accent-subtle)' : 'var(--bg-elevated)',
-                                            }}
-                                        >
-                                            <div style={{ fontSize: '13px', fontWeight: 500, color: 'var(--text-secondary)' }}>{tmpl.icon || tmpl.name?.[0] || '·'}</div>
-                                            <div style={{ fontSize: '12px', marginTop: '4px' }}>{String(t(`wizard.templates.${tmpl.name}`, tmpl.name))}</div>
-                                        </div>
-                                    ))}
-                                </div>
-
-                                {/* JSON Import */}
-                                <div style={{ marginTop: '8px' }}>
-                                    <label className="btn btn-ghost" style={{ fontSize: '12px', cursor: 'pointer', color: 'var(--text-tertiary)' }}>
-                                        ↑ {t('wizard.step1.importFromJson')}
-                                        <input type="file" accept=".json" style={{ display: 'none' }} onChange={e => {
-                                            const file = e.target.files?.[0];
-                                            if (!file) return;
-                                            const reader = new FileReader();
-                                            reader.onload = ev => {
-                                                try {
-                                                    const data = JSON.parse(ev.target?.result as string);
-                                                    setForm(prev => ({
-                                                        ...prev,
-                                                        name: data.name || prev.name,
-                                                        role_description: data.role_description || data.description || prev.role_description,
-                                                        template_id: '',
-                                                    }));
-                                                } catch {
-                                                    alert('Invalid JSON file');
-                                                }
-                                            };
-                                            reader.readAsText(file);
-                                            e.target.value = '';
-                                        }} />
-                                    </label>
-                                </div>
-                            </div>
-                        )}
 
                         <div className="form-group">
                             <label className="form-label">{t('agent.fields.name')} <span style={{ color: 'var(--error)' }}>*</span></label>
@@ -602,7 +544,6 @@ For humans, the message is delivered via their available channel (e.g. Feishu).`
                                                 onChange={() => { setForm({ ...form, primary_model_id: m.id }); clearFieldError('primary_model_id'); }} />
                                             <div>
                                                 <div style={{ fontWeight: 500, fontSize: '13px' }}>{m.label}</div>
-                                                <div style={{ fontSize: '11px', color: 'var(--text-tertiary)' }}>{m.provider}/{m.model}</div>
                                             </div>
                                         </label>
                                     ))}
@@ -685,7 +626,9 @@ For humans, the message is delivered via their available channel (e.g. Feishu).`
                                                 }
                                             }}
                                         />
-                                        <div style={{ fontSize: '18px' }}>{skill.icon}</div>
+                                        <div style={{ fontSize: '18px', display: 'flex', color: 'var(--text-tertiary)' }}>
+                                            {/[\u{1F000}-\u{1FAFF}\u{2600}-\u{27BF}]/u.test(skill.icon || '') ? <IconTools size={18} stroke={1.8} /> : (skill.icon || <IconTools size={18} stroke={1.8} />)}
+                                        </div>
                                         <div style={{ flex: 1 }}>
                                             <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
                                                 <span style={{ fontWeight: 500, fontSize: '13px' }}>{skill.name}</span>
@@ -712,6 +655,7 @@ For humans, the message is delivered via their available channel (e.g. Feishu).`
                             {[
                                 { value: 'company', label: t('wizard.step4.companyWide'), desc: t('wizard.step4.companyWideDesc') },
                                 { value: 'user', label: t('wizard.step4.selfOnly'), desc: t('wizard.step4.selfOnlyDesc') },
+                                { value: 'custom', label: t('agent.settings.perm.custom', 'Custom'), desc: t('agent.settings.perm.customDesc', 'Start private, then choose platform users in Settings') },
                             ].map((scope) => (
                                 <label key={scope.value} style={{
                                     display: 'flex', alignItems: 'center', gap: '12px', padding: '14px',
@@ -738,8 +682,8 @@ For humans, the message is delivered via their available channel (e.g. Feishu).`
                                 </label>
                                 <div style={{ display: 'flex', gap: '8px' }}>
                                     {[
-                                        { value: 'use', icon: '👁️', label: t('wizard.step4.useLevel', 'Use'), desc: t('wizard.step4.useDesc', 'Can use Task, Chat, Tools, Skills, Workspace') },
-                                        { value: 'manage', icon: '⚙️', label: t('wizard.step4.manageLevel', 'Manage'), desc: t('wizard.step4.manageDesc', 'Full access including Settings, Mind, Relationships') },
+                                        { value: 'use', icon: <IconEye size={14} stroke={1.8} />, label: t('wizard.step4.useLevel', 'Use'), desc: t('wizard.step4.useDesc', 'Can use Task, Chat, Tools, Skills, Workspace') },
+                                        { value: 'manage', icon: <IconSettings size={14} stroke={1.8} />, label: t('wizard.step4.manageLevel', 'Manage'), desc: t('wizard.step4.manageDesc', 'Full access including Settings, Mind, Relationships') },
                                     ].map((lvl) => (
                                         <label key={lvl.value} style={{
                                             flex: 1, display: 'flex', alignItems: 'flex-start', gap: '10px', padding: '12px',
@@ -750,7 +694,7 @@ For humans, the message is delivered via their available channel (e.g. Feishu).`
                                             <input type="radio" name="access_level" checked={form.permission_access_level === lvl.value}
                                                 onChange={() => setForm({ ...form, permission_access_level: lvl.value })} style={{ marginTop: '2px' }} />
                                             <div>
-                                                <div style={{ fontWeight: 500, fontSize: '13px' }}>{lvl.icon} {lvl.label}</div>
+                                                <div style={{ fontWeight: 500, fontSize: '13px', display: 'flex', alignItems: 'center', gap: '6px' }}>{lvl.icon} {lvl.label}</div>
                                                 <div style={{ fontSize: '11px', color: 'var(--text-tertiary)', marginTop: '2px' }}>{lvl.desc}</div>
                                             </div>
                                         </label>
@@ -784,11 +728,38 @@ For humans, the message is delivered via their available channel (e.g. Feishu).`
 
             {/* Summary sidebar */}
             {selectedModel && (
-                <div style={{ marginTop: '16px', padding: '12px', background: 'var(--bg-elevated)', borderRadius: '8px', fontSize: '12px', color: 'var(--text-secondary)', maxWidth: '640px' }}>
+                <div style={{ marginTop: '16px', padding: '12px', background: 'var(--bg-elevated)', borderRadius: '8px', fontSize: '12px', color: 'var(--text-secondary)', maxWidth: '640px', marginBottom: '80px' }}>
                     <strong>{form.name || t('wizard.summary.unnamed')}</strong> · {t('wizard.summary.model')}: {selectedModel.label}
                     {form.max_tokens_per_day && ` · ${t('wizard.summary.dailyLimit')}: ${Number(form.max_tokens_per_day).toLocaleString()}`}
                 </div>
             )}
+            {!selectedModel && <div style={{ marginBottom: '80px' }}></div>}
+
+            {/* Navigation — sticky footer at the bottom */}
+            <div style={{
+                position: 'fixed', bottom: 0, left: 'var(--sidebar-width)', right: 0,
+                background: 'var(--bg-primary)', borderTop: '1px solid var(--border-subtle)',
+                padding: '16px 32px', zIndex: 100,
+                display: 'flex', justifyContent: 'flex-start',
+                transition: 'left var(--transition-default)'
+            }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', width: '100%', maxWidth: '640px' }}>
+                    <button className="btn btn-secondary" onClick={() => step > 0 ? setStep(step - 1) : navigate('/')}
+                        disabled={createMutation.isPending}>
+                        {step === 0 ? t('common.cancel') : t('wizard.prev')}
+                    </button>
+                    {step < STEPS.length - 1 ? (
+                        <button className="btn btn-primary" onClick={handleNext}>
+                            {t('wizard.next')} →
+                        </button>
+                    ) : (
+                        <button className="btn btn-primary" onClick={handleFinish}
+                            disabled={createMutation.isPending}>
+                            {createMutation.isPending ? t('common.loading') : t('wizard.finish')}
+                        </button>
+                    )}
+                </div>
+            </div>
         </div>
     );
 }

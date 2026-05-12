@@ -1,15 +1,25 @@
-import { useState, type ReactNode } from 'react';
+import { useEffect, useState, type ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import QRCode from 'qrcode';
 import { channelApi } from '../services/api';
-
+import LinearCopyButton from './LinearCopyButton';
 // ─── Shared fetchAuth (same as AgentDetail) ─────────────
 function fetchAuth<T>(url: string, options?: RequestInit): Promise<T> {
     const token = localStorage.getItem('token');
     return fetch(`/api${url}`, {
         ...options,
         headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
-    }).then(r => r.json());
+    }).then(async r => {
+        if (r.status === 204) {
+            return undefined as T;
+        }
+        if (!r.ok) {
+            const error = await r.json().catch(() => ({ detail: `HTTP ${r.status}` }));
+            throw new Error(error.detail || `HTTP ${r.status}`);
+        }
+        return r.json() as Promise<T>;
+    });
 }
 
 // ─── Types ──────────────────────────────────────────────
@@ -75,6 +85,7 @@ const FeishuIcon = <img src="/feishu.png" alt="Feishu" width="20" height="20" st
 const TeamsIcon = <img src="/teams.png" alt="Teams" width="20" height="20" style={{ borderRadius: '4px' }} />;
 
 const WeComIcon = <img src="/wecom.png" alt="WeCom" width="20" height="20" style={{ borderRadius: '4px' }} />;
+const WeChatIcon = <img src="/wechat.svg" alt="WeChat" width="20" height="20" style={{ borderRadius: '4px' }} />;
 
 const DingTalkIcon = <img src="/dingtalk.png" alt="DingTalk" width="20" height="20" style={{ borderRadius: '4px' }} />;
 
@@ -154,6 +165,17 @@ const CHANNEL_REGISTRY: ChannelDef[] = [
         webhookLabel: 'Webhook URL',
     },
     {
+        id: 'wechat',
+        icon: WeChatIcon,
+        nameKey: 'common.channels.wechat',
+        nameFallback: 'WeChat',
+        desc: 'WeChat iLink Bot',
+        apiSlug: 'wechat-channel',
+        editOnly: true,
+        fields: [],
+        guide: { prefix: 'channelGuide.wechat', steps: 4 },
+    },
+    {
         id: 'wecom',
         icon: WeComIcon,
         nameKey: 'common.channels.wecom',
@@ -183,11 +205,14 @@ const CHANNEL_REGISTRY: ChannelDef[] = [
         nameFallback: 'DingTalk',
         desc: 'Stream Mode',
         apiSlug: 'dingtalk-channel',
+        connectionMode: true,
         fields: [
             { key: 'app_key', label: 'AppKey', type: 'password', required: true },
             { key: 'app_secret', label: 'AppSecret', type: 'password', required: true },
+            { key: 'agent_id', label: 'AgentId', type: 'text', placeholder: 'DingTalk应用AgentId(可选)', required: false },
         ],
         guide: { prefix: 'channelGuide.dingtalk', steps: 6 },
+        webhookLabel: 'Webhook URL',
     },
     {
         id: 'atlassian',
@@ -206,13 +231,14 @@ const CHANNEL_REGISTRY: ChannelDef[] = [
 ];
 
 // ─── Feishu Permission JSON ─────────────────────────────
-const FEISHU_PERM_JSON = '{"scopes":{"tenant":["contact:contact.base:readonly","contact:user.base:readonly","contact:user.id:readonly","im:chat","im:message","im:message.group_at_msg:readonly","im:message.p2p_msg:readonly","im:message:send_as_bot","im:resource"],"user":[]}}';
+const FEISHU_PERM_BASIC_JSON = '{"scopes":{"tenant":["contact:contact.base:readonly","contact:user.base:readonly","contact:user.employee_id:readonly","contact:user.id:readonly","im:chat","im:message","im:message.group_at_msg:readonly","im:message.p2p_msg:readonly","im:message:send_as_bot","im:resource"],"user":[]}}';
 
-const FEISHU_PERM_DISPLAY = `{
+const FEISHU_PERM_BASIC_DISPLAY = `{
   "scopes": {
     "tenant": [
       "contact:contact.base:readonly",
       "contact:user.base:readonly",
+      "contact:user.employee_id:readonly",
       "contact:user.id:readonly",
       "im:chat",
       "im:message",
@@ -225,22 +251,56 @@ const FEISHU_PERM_DISPLAY = `{
   }
 }`;
 
-// ─── Copy Button helper ─────────────────────────────────
-function CopyBtn({ url }: { url: string }) {
-    return (
-        <button title="Copy" style={{ display: 'inline-flex', alignItems: 'center', justifyContent: 'center', marginLeft: '6px', padding: '1px 4px', cursor: 'pointer', borderRadius: '3px', border: '1px solid var(--border-color)', background: 'var(--bg-primary)', color: 'var(--text-secondary)', verticalAlign: 'middle', lineHeight: 1 }}
-            onClick={() => navigator.clipboard.writeText(url)}>
-            <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-                <rect x="4" y="4" width="9" height="11" rx="1.5" /><path d="M3 11H2a1 1 0 01-1-1V2a1 1 0 011-1h8a1 1 0 011 1v1" />
-            </svg>
-        </button>
-    );
-}
+const FEISHU_PERM_FULL_JSON = '{"scopes":{"tenant":["approval:approval","base:app:create","base:dashboard:create","base:field_group:create","bitable:app","bitable:app:readonly","board:whiteboard:node:create","calendar:calendar.event:create","calendar:calendar.event:delete","calendar:calendar.event:read","calendar:calendar.event:update","calendar:calendar.free_busy:read","calendar:calendar:readonly","contact:contact.base:readonly","contact:user.base:readonly","contact:user.employee_id:readonly","contact:user.id:readonly","docx:document","docx:document:create","drive:drive","im:chat","im:message","im:message.group_at_msg:readonly","im:message.p2p_msg:readonly","im:message:send_as_bot","im:resource","sheets:spreadsheet:create","slides:presentation:create","slides:presentation:write_only","wiki:wiki","wiki:wiki:readonly"],"user":[]}}';
+
+const FEISHU_PERM_FULL_DISPLAY = `{
+  "scopes": {
+    "tenant": [
+      "approval:approval",
+      "base:app:create",
+      "base:dashboard:create",
+      "base:field_group:create",
+      "bitable:app",
+      "bitable:app:readonly",
+      "board:whiteboard:node:create",
+      "calendar:calendar.event:create",
+      "calendar:calendar.event:delete",
+      "calendar:calendar.event:read",
+      "calendar:calendar.event:update",
+      "calendar:calendar.free_busy:read",
+      "calendar:calendar:readonly",
+      "contact:contact.base:readonly",
+      "contact:user.base:readonly",
+      "contact:user.employee_id:readonly",
+      "contact:user.id:readonly",
+      "docx:document",
+      "docx:document:create",
+      "drive:drive",
+      "im:chat",
+      "im:message",
+      "im:message.group_at_msg:readonly",
+      "im:message.p2p_msg:readonly",
+      "im:message:send_as_bot",
+      "im:resource",
+      "sheets:spreadsheet:create",
+      "slides:presentation:create",
+      "slides:presentation:write_only",
+      "wiki:wiki",
+      "wiki:wiki:readonly"
+    ],
+    "user": []
+  }
+}`;
+
+// CopyBtn is removed, using LinearCopyButton directly
 
 // ─── Main Component ─────────────────────────────────────
 export default function ChannelConfig({ mode, agentId, canManage = true, values, onChange }: ChannelConfigProps) {
     const { t } = useTranslation();
     const queryClient = useQueryClient();
+
+    // Feishu Permission Mode
+    const [feishuPermMode, setFeishuPermMode] = useState<'basic' | 'full'>('basic');
 
     // Collapsible state per channel
     const [openChannels, setOpenChannels] = useState<Record<string, boolean>>({});
@@ -260,6 +320,7 @@ export default function ChannelConfig({ mode, agentId, canManage = true, values,
     const [connectionModes, setConnectionModes] = useState<Record<string, string>>({
         feishu: 'websocket',
         wecom: 'websocket',
+        dingtalk: 'websocket',
         discord: 'gateway',
     });
 
@@ -270,6 +331,11 @@ export default function ChannelConfig({ mode, agentId, canManage = true, values,
     // Atlassian test connection state
     const [atlassianTesting, setAtlassianTesting] = useState(false);
     const [atlassianTestResult, setAtlassianTestResult] = useState<{ ok: boolean; message?: string; tool_count?: number; error?: string } | null>(null);
+    const [actionFeedback, setActionFeedback] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
+    const [wechatQr, setWechatQr] = useState<{ qrcode: string; qrcode_img_content: string } | null>(null);
+    const [wechatQrImageSrc, setWechatQrImageSrc] = useState('');
+    const [wechatQrStatus, setWechatQrStatus] = useState('');
+    const [wechatLoadingQr, setWechatLoadingQr] = useState(false);
 
     // ─── Edit mode: queries for each channel ────────────
     const enabled = mode === 'edit' && !!agentId;
@@ -319,6 +385,11 @@ export default function ChannelConfig({ mode, agentId, canManage = true, values,
         queryFn: () => fetchAuth<any>(`/agents/${agentId}/dingtalk-channel`).catch(() => null),
         enabled: enabled,
     });
+    const { data: wechatConfig } = useQuery({
+        queryKey: ['wechat-channel', agentId],
+        queryFn: () => fetchAuth<any>(`/agents/${agentId}/wechat-channel`).catch(() => null),
+        enabled: enabled,
+    });
     const { data: wecomConfig } = useQuery({
         queryKey: ['wecom-channel', agentId],
         queryFn: () => fetchAuth<any>(`/agents/${agentId}/wecom-channel`).catch(() => null),
@@ -334,7 +405,6 @@ export default function ChannelConfig({ mode, agentId, canManage = true, values,
         queryFn: () => fetchAuth<any>(`/agents/${agentId}/atlassian-channel`).catch(() => null),
         enabled: enabled,
     });
-
     // Helper: get config data for a channel
     const getConfig = (id: string): any => {
         switch (id) {
@@ -343,6 +413,7 @@ export default function ChannelConfig({ mode, agentId, canManage = true, values,
             case 'discord': return discordConfig;
             case 'teams': return teamsConfig;
             case 'dingtalk': return dingtalkConfig;
+            case 'wechat': return wechatConfig;
             case 'wecom': return wecomConfig;
             case 'atlassian': return atlassianConfig;
             default: return null;
@@ -377,6 +448,16 @@ export default function ChannelConfig({ mode, agentId, canManage = true, values,
             // Reset form
             setForms(prev => ({ ...prev, [ch.id]: {} }));
             setEditing(ch.id, false);
+            setActionFeedback({
+                type: 'success',
+                text: t('agent.settings.channel.saveSuccess', 'Channel configuration saved.'),
+            });
+        },
+        onError: (error: Error) => {
+            setActionFeedback({
+                type: 'error',
+                text: error.message || t('agent.settings.channel.saveFailed', 'Failed to save channel configuration.'),
+            });
         },
     });
 
@@ -393,6 +474,17 @@ export default function ChannelConfig({ mode, agentId, canManage = true, values,
                 : [[`${ch.apiSlug}`, agentId]];
             keys.forEach(k => queryClient.invalidateQueries({ queryKey: k }));
             if (ch.id === 'atlassian') setAtlassianTestResult(null);
+            setEditing(ch.id, false);
+            setActionFeedback({
+                type: 'success',
+                text: t('agent.settings.channel.disconnectSuccess', 'Channel disconnected.'),
+            });
+        },
+        onError: (error: Error) => {
+            setActionFeedback({
+                type: 'error',
+                text: error.message || t('agent.settings.channel.disconnectFailed', 'Failed to disconnect channel.'),
+            });
         },
     });
 
@@ -406,6 +498,142 @@ export default function ChannelConfig({ mode, agentId, canManage = true, values,
             setAtlassianTestResult({ ok: false, error: String(e) });
         }
         setAtlassianTesting(false);
+    };
+
+    useEffect(() => {
+        if (mode !== 'edit' || !agentId || !wechatQr?.qrcode) return;
+        let cancelled = false;
+        let timer: number | null = null;
+
+        const poll = async () => {
+            try {
+                const result = await fetchAuth<any>(`/agents/${agentId}/wechat-channel/qrcode-status?qrcode=${encodeURIComponent(wechatQr.qrcode)}`);
+                if (cancelled) return;
+                setWechatQrStatus(result.status || '');
+                if (result.status === 'confirmed') {
+                    setWechatQr(null);
+                    setEditing('wechat', false);
+                    queryClient.invalidateQueries({ queryKey: ['wechat-channel', agentId] });
+                    return;
+                }
+            } catch {
+                // Keep the polling loop silent; users can refresh the QR code manually.
+            }
+            if (!cancelled) {
+                timer = window.setTimeout(poll, 3000);
+            }
+        };
+
+        void poll();
+
+        return () => {
+            cancelled = true;
+            if (timer !== null) {
+                window.clearTimeout(timer);
+            }
+        };
+    }, [mode, agentId, wechatQr?.qrcode, queryClient]);
+
+    useEffect(() => {
+        const raw = wechatQr?.qrcode_img_content?.trim() || '';
+        let disposed = false;
+        let objectUrl = '';
+        if (!raw) {
+            setWechatQrImageSrc('');
+            return;
+        }
+        if (raw.startsWith('http://') || raw.startsWith('https://')) {
+            const token = localStorage.getItem('token');
+            fetch(`/api/agents/${agentId}/wechat-channel/qrcode-image?url=${encodeURIComponent(raw)}`, {
+                headers: token ? { Authorization: `Bearer ${token}` } : {},
+            }).then(async (resp) => {
+                if (!resp.ok) {
+                    throw new Error(`HTTP ${resp.status}`);
+                }
+                const blob = await resp.blob();
+                const contentType = (blob.type || resp.headers.get('content-type') || '').toLowerCase();
+                if (contentType.startsWith('image/')) {
+                    return { kind: 'image' as const, blob };
+                }
+                return { kind: 'qr' as const, text: raw };
+            }).then((result) => {
+                if (disposed) return;
+                if (result.kind === 'image') {
+                    objectUrl = URL.createObjectURL(result.blob);
+                    setWechatQrImageSrc(objectUrl);
+                    return;
+                }
+                return QRCode.toDataURL(result.text, {
+                    width: 220,
+                    margin: 1,
+                    color: {
+                        dark: '#111111',
+                        light: '#FFFFFF',
+                    },
+                }).then((dataUrl: string) => {
+                    if (!disposed) {
+                        setWechatQrImageSrc(dataUrl);
+                    }
+                });
+            }).catch(() => {
+                if (!disposed) {
+                    setWechatQrImageSrc('');
+                }
+            });
+            return () => {
+                disposed = true;
+                if (objectUrl) {
+                    URL.revokeObjectURL(objectUrl);
+                }
+            };
+        }
+        if (raw.startsWith('data:image/')) {
+            setWechatQrImageSrc(raw);
+            return;
+        }
+
+        QRCode.toDataURL(raw, {
+            width: 220,
+            margin: 1,
+            color: {
+                dark: '#111111',
+                light: '#FFFFFF',
+            },
+        }).then((dataUrl: string) => {
+            if (!disposed) {
+                setWechatQrImageSrc(dataUrl);
+            }
+        }).catch(() => {
+            if (!disposed) {
+                setWechatQrImageSrc('');
+            }
+        });
+
+        return () => {
+            disposed = true;
+        };
+    }, [wechatQr?.qrcode_img_content]);
+
+    const createWechatQr = async () => {
+        if (!agentId) return;
+        setWechatLoadingQr(true);
+        setWechatQrStatus('');
+        setWechatQrImageSrc('');
+        try {
+            const qr = await fetchAuth<any>(`/agents/${agentId}/wechat-channel/qrcode`, {
+                method: 'POST',
+                body: JSON.stringify({}),
+            });
+            setWechatQr(qr);
+            setWechatQrStatus('wait');
+        } catch (error: any) {
+            setActionFeedback({
+                type: 'error',
+                text: error.message || 'Failed to generate WeChat QR code.',
+            });
+        } finally {
+            setWechatLoadingQr(false);
+        }
     };
 
     // ─── Build save payload for a channel ───────────────
@@ -433,6 +661,15 @@ export default function ChannelConfig({ mode, agentId, canManage = true, values,
             }
             return { ...form, connection_mode: 'webhook' };
         }
+        if (ch.id === 'dingtalk') {
+            return {
+                ...form,
+                extra_config: {
+                    connection_mode: connectionModes.dingtalk || 'websocket',
+                    agent_id: form.agent_id || '',
+                },
+            };
+        }
         // Generic channels
         return form;
     };
@@ -455,20 +692,39 @@ export default function ChannelConfig({ mode, agentId, canManage = true, values,
                 </ol>
                 {ch.showPermJson && (
                     <div style={{ margin: '8px 0', borderRadius: '6px', border: '1px solid var(--border-color)', overflow: 'hidden' }}>
-                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '4px 10px', background: 'var(--bg-secondary)', borderBottom: '1px solid var(--border-color)' }}>
-                            <span style={{ fontSize: '10px', color: 'var(--text-secondary)', fontWeight: 500 }}>{t('channelGuide.feishuPermJson')}</span>
-                            <button type="button" style={{ fontSize: '10px', padding: '1px 7px', cursor: 'pointer', borderRadius: '3px', border: '1px solid var(--border-color)', background: 'var(--bg-primary)', color: 'var(--text-secondary)' }}
-                                onClick={(e) => {
-                                    const btn = e.currentTarget;
-                                    navigator.clipboard.writeText(FEISHU_PERM_JSON).then(() => {
-                                        const o = btn.textContent;
-                                        btn.textContent = t('channelGuide.feishuPermCopied');
-                                        btn.style.color = 'rgb(16,185,129)';
-                                        setTimeout(() => { btn.textContent = o; btn.style.color = ''; }, 1500);
-                                    });
-                                }}>{t('channelGuide.feishuPermCopy')}</button>
+                        {/* Segmented control header */}
+                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '6px 10px', background: 'var(--bg-secondary)', borderBottom: '1px solid var(--border-color)' }}>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '2px', background: 'var(--bg-primary)', borderRadius: '5px', padding: '2px', border: '1px solid var(--border-color)' }}>
+                                {(['basic', 'full'] as const).map(mode => (
+                                    <button
+                                        key={mode}
+                                        type="button"
+                                        onClick={(e) => { e.preventDefault(); setFeishuPermMode(mode); }}
+                                        style={{
+                                            padding: '3px 10px', fontSize: '10px', borderRadius: '4px', cursor: 'pointer',
+                                            border: 'none', transition: 'all 0.15s ease',
+                                            background: feishuPermMode === mode ? 'var(--accent-primary, #5e6ad2)' : 'transparent',
+                                            color: feishuPermMode === mode ? '#fff' : 'var(--text-tertiary)',
+                                            fontWeight: 500,
+                                        }}>
+                                        {t(`channelGuide.feishuPerm${mode === 'basic' ? 'Basic' : 'Full'}`)}
+                                    </button>
+                                ))}
+                            </div>
+                            <LinearCopyButton
+                                textToCopy={feishuPermMode === 'basic' ? FEISHU_PERM_BASIC_JSON : FEISHU_PERM_FULL_JSON}
+                                label={t('channelGuide.feishuPermCopy')}
+                                copiedLabel={t('channelGuide.feishuPermCopied')}
+                                className=""
+                                style={{ fontSize: '10px', padding: '1px 7px', cursor: 'pointer', borderRadius: '3px', border: '1px solid var(--border-color)', background: 'var(--bg-primary)', color: 'var(--text-secondary)' }}
+                            />
                         </div>
-                        <pre style={{ margin: 0, padding: '6px 10px', fontSize: '10px', fontFamily: 'var(--font-mono)', lineHeight: 1.5, background: 'var(--bg-primary)', color: 'var(--text-secondary)', overflowX: 'auto', userSelect: 'all' }}>{FEISHU_PERM_DISPLAY}</pre>
+                        {/* Description */}
+                        <div style={{ padding: '4px 10px', fontSize: '10px', color: 'var(--text-tertiary)', background: 'var(--bg-secondary)', borderBottom: '1px solid var(--border-color)' }}>
+                            {feishuPermMode === 'basic' ? t('channelGuide.feishuPermBasicDesc') : t('channelGuide.feishuPermFullDesc')}
+                        </div>
+                        {/* JSON code block */}
+                        <pre style={{ margin: 0, padding: '6px 10px', fontSize: '10px', fontFamily: 'var(--font-mono)', lineHeight: 1.5, background: 'var(--bg-primary)', color: 'var(--text-secondary)', overflowX: 'auto', userSelect: 'all', maxHeight: '200px', overflowY: 'auto' }}>{feishuPermMode === 'basic' ? FEISHU_PERM_BASIC_DISPLAY : FEISHU_PERM_FULL_DISPLAY}</pre>
                     </div>
                 )}
                 <div style={{ fontSize: '11px', color: 'var(--text-tertiary)', background: 'var(--bg-secondary)', padding: '6px 10px', borderRadius: '6px' }}>
@@ -522,10 +778,10 @@ export default function ChannelConfig({ mode, agentId, canManage = true, values,
         // Ensure we default to 'websocket' for connectionMode in create view if enabled
         const connMode = ch.connectionMode ? (connectionModes[ch.id] || 'websocket') : null;
         const isWs = connMode === 'websocket';
-        
+
         // Active fields for current mode
         const activeFields = (ch.connectionMode && isWs && ch.wsFields) ? ch.wsFields : ch.fields;
-        
+
         // Special Feishu field filtering (hide encrypt_key if websocket mode)
         const formFields = ch.id === 'feishu' && isWs
             ? ch.fields.filter(f => f.key !== 'encrypt_key')
@@ -573,9 +829,9 @@ export default function ChannelConfig({ mode, agentId, canManage = true, values,
                                 </label>
                             </div>
                         )}
-                        
+
                         {renderGuide(ch.guide, !!isWs, ch)}
-                        
+
                         {formFields.map(field => (
                             <div className="form-group" key={field.key}>
                                 {renderField(
@@ -681,10 +937,27 @@ export default function ChannelConfig({ mode, agentId, canManage = true, values,
                                 {/* WeCom websocket status */}
                                 {ch.id === 'wecom' && configConnMode === 'websocket' && (
                                     <div style={{ background: 'var(--bg-secondary)', borderRadius: '6px', padding: '10px', fontSize: '12px', marginBottom: '12px' }}>
-                                        <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                                            <span style={{ width: '6px', height: '6px', borderRadius: '50%', background: '#07C160', display: 'inline-block' }}></span>
-                                            <span style={{ color: 'var(--text-secondary)' }}>Connected via WebSocket (No callback URL needed)</span>
+                                        <div style={{ display: 'flex', alignItems: 'center', gap: '6px', marginBottom: '6px' }}>
+                                            <span
+                                                style={{
+                                                    width: '6px',
+                                                    height: '6px',
+                                                    borderRadius: '50%',
+                                                    background: config.is_connected ? '#07C160' : '#F59E0B',
+                                                    display: 'inline-block',
+                                                }}
+                                            ></span>
+                                            <span style={{ color: 'var(--text-secondary)' }}>
+                                                {config.is_connected
+                                                    ? t('agent.settings.channel.websocketConnected', 'Connected via WebSocket (No callback URL needed)')
+                                                    : t('agent.settings.channel.websocketDisconnected', 'Configured for WebSocket, but currently disconnected')}
+                                            </span>
                                         </div>
+                                        {!config.is_connected && (
+                                            <div style={{ fontSize: '11px', color: 'var(--text-tertiary)' }}>
+                                                {t('agent.settings.channel.websocketDisconnectedHint', 'Reconnect by saving the WeCom WebSocket configuration again.')}
+                                            </div>
+                                        )}
                                     </div>
                                 )}
 
@@ -694,7 +967,13 @@ export default function ChannelConfig({ mode, agentId, canManage = true, values,
                                         <div style={{ color: 'var(--text-tertiary)', marginBottom: '6px' }}>{ch.webhookLabel}</div>
                                         <div style={{ lineHeight: 1.6, wordBreak: 'break-all' }}>
                                             <span style={{ color: 'var(--accent-primary)' }}>{webhookUrl}</span>
-                                            <CopyBtn url={webhookUrl} />
+                                            <LinearCopyButton
+                                                textToCopy={webhookUrl}
+                                                label="Copy"
+                                                iconOnly={true}
+                                                className=""
+                                                style={{ marginLeft: '6px', padding: '1px 4px', cursor: 'pointer', borderRadius: '3px', border: '1px solid var(--border-color)', background: 'var(--bg-primary)', color: 'var(--text-secondary)', verticalAlign: 'middle' }}
+                                            />
                                         </div>
                                     </div>
                                 )}
@@ -713,10 +992,20 @@ export default function ChannelConfig({ mode, agentId, canManage = true, values,
                                     </div>
                                 )}
 
-                                {/* DingTalk stream mode hint */}
-                                {ch.id === 'dingtalk' && (
-                                    <div style={{ fontSize: '11px', color: 'var(--text-tertiary)', marginBottom: '8px', padding: '8px 10px', background: 'var(--bg-secondary)', borderRadius: '6px' }}>
-                                        Stream mode active. No webhook URL needed.
+                                {/* DingTalk stream mode status */}
+                                {ch.id === 'dingtalk' && configConnMode === 'websocket' && (
+                                    <div style={{ background: 'var(--bg-secondary)', borderRadius: '6px', padding: '10px', fontSize: '12px', marginBottom: '12px' }}>
+                                        <div style={{ display: 'flex', alignItems: 'center', gap: '6px', marginBottom: '6px' }}>
+                                            <span style={{ width: '6px', height: '6px', borderRadius: '50%', background: '#007FFF', display: 'inline-block' }}></span>
+                                            <span style={{ color: 'var(--text-secondary)' }}>Connected via Stream (No callback URL needed)</span>
+                                        </div>
+                                        <div style={{ fontSize: '11px', color: 'var(--text-tertiary)' }}>App Key: <code>{config.app_id}</code></div>
+                                    </div>
+                                )}
+                                {ch.id === 'dingtalk' && configConnMode !== 'websocket' && (
+                                    <div style={{ fontSize: '12px', color: 'var(--text-tertiary)', marginBottom: '8px' }}>
+                                        <div style={{ marginBottom: '4px' }}>Mode: <strong>Webhook</strong></div>
+                                        <div>App Key: <code>{config.app_id}</code></div>
                                     </div>
                                 )}
 
@@ -726,6 +1015,20 @@ export default function ChannelConfig({ mode, agentId, canManage = true, values,
                                         <div style={{ color: 'var(--text-tertiary)', marginBottom: '4px' }}>Status</div>
                                         <div style={{ color: 'var(--text-primary)', fontWeight: 500 }}>API Key configured — Jira / Confluence / Compass tools available</div>
                                         {config.cloud_id && <div style={{ color: 'var(--text-tertiary)', marginTop: '4px', fontSize: '11px' }}>Cloud ID: <code>{config.cloud_id}</code></div>}
+                                    </div>
+                                )}
+                                {ch.id === 'wechat' && (
+                                    <div style={{ background: 'var(--bg-secondary)', borderRadius: '6px', padding: '10px', fontSize: '12px', marginBottom: '12px' }}>
+                                        <div style={{ color: 'var(--text-tertiary)', marginBottom: '4px' }}>Status</div>
+                                        <div style={{ color: 'var(--text-primary)', fontWeight: 500 }}>
+                                            {config.extra_config?.session_expired
+                                                ? 'Session expired, reconnect required'
+                                                : config.is_connected
+                                                    ? 'WeChat iLink connected'
+                                                    : 'Configured, waiting for long polling'}
+                                        </div>
+                                        {config.app_id && <div style={{ color: 'var(--text-tertiary)', marginTop: '4px', fontSize: '11px' }}>Bot ID: <code>{config.app_id}</code></div>}
+                                        {config.extra_config?.ilink_user_id && <div style={{ color: 'var(--text-tertiary)', marginTop: '4px', fontSize: '11px' }}>Linked User: <code>{config.extra_config.ilink_user_id}</code></div>}
                                     </div>
                                 )}
                                 {ch.id === 'atlassian' && atlassianTestResult && (
@@ -741,60 +1044,72 @@ export default function ChannelConfig({ mode, agentId, canManage = true, values,
 
                                 {/* Action buttons */}
                                 <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
-                                    {ch.hasTestConnection && (
+                                    {ch.hasTestConnection && ch.id === 'atlassian' && (
                                         <button className="btn btn-secondary" style={{ fontSize: '12px', padding: '4px 12px' }} onClick={testAtlassian} disabled={atlassianTesting}>
                                             {atlassianTesting ? 'Testing...' : 'Test Connection'}
                                         </button>
                                     )}
-                                    <button className="btn btn-secondary" style={{ fontSize: '12px', padding: '4px 12px' }}
-                                        onClick={() => {
-                                            // Populate form with existing config data
-                                            const prefill: Record<string, string> = {};
-                                            if (ch.id === 'feishu') {
-                                                prefill.app_id = config.app_id || '';
-                                                prefill.app_secret = config.app_secret || '';
-                                                prefill.encrypt_key = config.encrypt_key || '';
-                                                setConnectionModes(prev => ({ ...prev, feishu: config.extra_config?.connection_mode || 'websocket' }));
-                                            } else if (ch.id === 'wecom') {
-                                                const cm = config.extra_config?.connection_mode === 'websocket' ? 'websocket' : 'webhook';
-                                                setConnectionModes(prev => ({ ...prev, wecom: cm }));
-                                                if (cm === 'websocket') {
-                                                    prefill.bot_id = config.extra_config?.bot_id || '';
-                                                    prefill.bot_secret = config.extra_config?.bot_secret || '';
-                                                } else {
-                                                    prefill.corp_id = config.app_id || '';
-                                                    prefill.wecom_agent_id = config.extra_config?.wecom_agent_id || '';
-                                                    prefill.secret = config.app_secret || '';
-                                                    prefill.token = config.verification_token || '';
-                                                    prefill.encoding_aes_key = config.encrypt_key || '';
-                                                }
-                                            } else if (ch.id === 'slack') {
-                                                prefill.bot_token = config.app_secret || '';
-                                                prefill.signing_secret = config.encrypt_key || '';
-                                            } else if (ch.id === 'discord') {
-                                                const cm = config.extra_config?.connection_mode === 'gateway' ? 'websocket' : 'webhook';
-                                                setConnectionModes(prev => ({ ...prev, discord: cm }));
-                                                if (cm === 'websocket') {
+                                    {ch.id === 'wechat' && (
+                                        <button className="btn btn-secondary" style={{ fontSize: '12px', padding: '4px 12px' }}
+                                            onClick={() => {
+                                                setWechatQr(null);
+                                                setWechatQrStatus('');
+                                                setEditing(ch.id, true);
+                                            }}>Reconnect</button>
+                                    )}
+                                    {ch.id !== 'wechat' && (
+                                        <button className="btn btn-secondary" style={{ fontSize: '12px', padding: '4px 12px' }}
+                                            onClick={() => {
+                                                // Populate form with existing config data
+                                                const prefill: Record<string, string> = {};
+                                                if (ch.id === 'feishu') {
+                                                    prefill.app_id = config.app_id || '';
+                                                    prefill.app_secret = config.app_secret || '';
+                                                    prefill.encrypt_key = config.encrypt_key || '';
+                                                    setConnectionModes(prev => ({ ...prev, feishu: config.extra_config?.connection_mode || 'websocket' }));
+                                                } else if (ch.id === 'wecom') {
+                                                    const cm = config.extra_config?.connection_mode === 'websocket' ? 'websocket' : 'webhook';
+                                                    setConnectionModes(prev => ({ ...prev, wecom: cm }));
+                                                    if (cm === 'websocket') {
+                                                        prefill.bot_id = config.extra_config?.bot_id || '';
+                                                        prefill.bot_secret = config.extra_config?.bot_secret || '';
+                                                    } else {
+                                                        prefill.corp_id = config.app_id || '';
+                                                        prefill.wecom_agent_id = config.extra_config?.wecom_agent_id || '';
+                                                        prefill.secret = config.app_secret || '';
+                                                        prefill.token = config.verification_token || '';
+                                                        prefill.encoding_aes_key = config.encrypt_key || '';
+                                                    }
+                                                } else if (ch.id === 'slack') {
                                                     prefill.bot_token = config.app_secret || '';
-                                                } else {
-                                                    prefill.application_id = config.app_id || '';
-                                                    prefill.bot_token = config.app_secret || '';
-                                                    prefill.public_key = config.encrypt_key || '';
+                                                    prefill.signing_secret = config.encrypt_key || '';
+                                                } else if (ch.id === 'discord') {
+                                                    const cm = config.extra_config?.connection_mode === 'gateway' ? 'websocket' : 'webhook';
+                                                    setConnectionModes(prev => ({ ...prev, discord: cm }));
+                                                    if (cm === 'websocket') {
+                                                        prefill.bot_token = config.app_secret || '';
+                                                    } else {
+                                                        prefill.application_id = config.app_id || '';
+                                                        prefill.bot_token = config.app_secret || '';
+                                                        prefill.public_key = config.encrypt_key || '';
+                                                    }
+                                                } else if (ch.id === 'teams') {
+                                                    prefill.app_id = config.app_id || '';
+                                                    prefill.app_secret = config.app_secret || '';
+                                                    prefill.tenant_id = config.extra_config?.tenant_id || '';
+                                                } else if (ch.id === 'dingtalk') {
+                                                    prefill.app_key = config.app_id || '';
+                                                    prefill.app_secret = config.app_secret || '';
+                                                    prefill.agent_id = config.extra_config?.agent_id || '';
+                                                    setConnectionModes(prev => ({ ...prev, dingtalk: config.extra_config?.connection_mode || 'websocket' }));
+                                                } else if (ch.id === 'atlassian') {
+                                                    prefill.api_key = '';
+                                                    prefill.cloud_id = config.cloud_id || '';
                                                 }
-                                            } else if (ch.id === 'teams') {
-                                                prefill.app_id = config.app_id || '';
-                                                prefill.app_secret = config.app_secret || '';
-                                                prefill.tenant_id = config.extra_config?.tenant_id || '';
-                                            } else if (ch.id === 'dingtalk') {
-                                                prefill.app_key = config.app_id || '';
-                                                prefill.app_secret = config.app_secret || '';
-                                            } else if (ch.id === 'atlassian') {
-                                                prefill.api_key = '';
-                                                prefill.cloud_id = config.cloud_id || '';
-                                            }
-                                            setForms(prev => ({ ...prev, [ch.id]: prefill }));
-                                            setEditing(ch.id, true);
-                                        }}>Edit</button>
+                                                setForms(prev => ({ ...prev, [ch.id]: prefill }));
+                                                setEditing(ch.id, true);
+                                            }}>Edit</button>
+                                    )}
                                     <button className="btn btn-danger" style={{ fontSize: '12px', padding: '4px 12px' }}
                                         onClick={() => deleteMutation.mutate({ ch })}>Disconnect</button>
                                 </div>
@@ -802,6 +1117,42 @@ export default function ChannelConfig({ mode, agentId, canManage = true, values,
                         ) : (
                             /* ── Form view (new or editing) ── */
                             <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                                {ch.id === 'wechat' ? (
+                                    <>
+                                        {renderGuide(ch.guide, false, ch)}
+                                        <div style={{ background: 'var(--bg-secondary)', borderRadius: '8px', padding: '12px', fontSize: '12px', color: 'var(--text-secondary)', lineHeight: 1.6 }}>
+                                            This channel uses QR login and long polling. After scan confirmation, the bot will start polling WeChat iLink automatically.
+                                        </div>
+                                        {wechatQr?.qrcode_img_content ? (
+                                            <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-start', gap: '10px' }}>
+                                                {wechatQrImageSrc ? (
+                                                    <img src={wechatQrImageSrc} alt="WeChat QR" style={{ width: '220px', height: '220px', objectFit: 'contain', background: '#fff', padding: '8px', borderRadius: '8px', border: '1px solid var(--border-subtle)' }} />
+                                                ) : (
+                                                    <div style={{ width: '220px', height: '220px', display: 'flex', alignItems: 'center', justifyContent: 'center', background: '#fff', borderRadius: '8px', border: '1px solid var(--border-subtle)', color: 'var(--text-secondary)', fontSize: '12px', padding: '8px', textAlign: 'center' }}>
+                                                        Generating QR image...
+                                                    </div>
+                                                )}
+                                                <div style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>
+                                                    Status: <strong>{wechatQrStatus || 'wait'}</strong>
+                                                </div>
+                                                <div style={{ display: 'flex', gap: '8px' }}>
+                                                    <button className="btn btn-secondary" style={{ fontSize: '12px' }} onClick={createWechatQr} disabled={wechatLoadingQr}>
+                                                        {wechatLoadingQr ? 'Refreshing...' : 'Refresh QR'}
+                                                    </button>
+                                                    {isEditing && <button className="btn btn-secondary" style={{ fontSize: '12px' }} onClick={() => setEditing(ch.id, false)}>Cancel</button>}
+                                                </div>
+                                            </div>
+                                        ) : (
+                                            <div style={{ display: 'flex', gap: '8px', marginTop: '4px' }}>
+                                                <button className="btn btn-primary" style={{ fontSize: '12px', alignSelf: 'flex-start' }} onClick={createWechatQr} disabled={wechatLoadingQr}>
+                                                    {wechatLoadingQr ? 'Generating...' : 'Generate QR Code'}
+                                                </button>
+                                                {isEditing && <button className="btn btn-secondary" style={{ fontSize: '12px' }} onClick={() => setEditing(ch.id, false)}>Cancel</button>}
+                                            </div>
+                                        )}
+                                    </>
+                                ) : (
+                                    <>
                                 {/* Connection mode toggle (feishu, wecom) */}
                                 {ch.connectionMode && (
                                     <div style={{ marginBottom: '8px' }}>
@@ -850,6 +1201,8 @@ export default function ChannelConfig({ mode, agentId, canManage = true, values,
                                     </button>
                                     {isEditing && <button className="btn btn-secondary" style={{ fontSize: '12px' }} onClick={() => setEditing(ch.id, false)}>Cancel</button>}
                                 </div>
+                                    </>
+                                )}
                             </div>
                         )}
                     </div>
@@ -889,13 +1242,21 @@ export default function ChannelConfig({ mode, agentId, canManage = true, values,
         <div className="card" style={{ marginBottom: '12px' }}>
             <h4 style={{ marginBottom: '12px' }}>{t('agent.settings.channel.title')}</h4>
             <p style={{ fontSize: '12px', color: 'var(--text-tertiary)', marginBottom: '8px' }}>{t('agent.settings.channel.title')}</p>
-            <div style={{
-                padding: '10px 14px', borderRadius: '8px', marginBottom: '16px',
-                background: 'rgba(59,130,246,0.08)', border: '1px solid rgba(59,130,246,0.2)',
-                fontSize: '12px', color: 'var(--text-secondary)', lineHeight: '1.6',
-            }}>
-                {t('agent.settings.channel.syncHint', 'Before configuring the Feishu bot, please sync your organization structure in Enterprise Settings → Org Structure first. This ensures the bot can identify message senders.')}
-            </div>
+            {actionFeedback && (
+                <div
+                    style={{
+                        padding: '10px 14px',
+                        borderRadius: '8px',
+                        marginBottom: '12px',
+                        background: actionFeedback.type === 'success' ? 'rgba(16,185,129,0.12)' : 'rgba(239,68,68,0.12)',
+                        border: `1px solid ${actionFeedback.type === 'success' ? 'rgba(16,185,129,0.25)' : 'rgba(239,68,68,0.25)'}`,
+                        fontSize: '12px',
+                        color: actionFeedback.type === 'success' ? 'rgb(5,150,105)' : 'rgb(220,38,38)',
+                    }}
+                >
+                    {actionFeedback.text}
+                </div>
+            )}
             {CHANNEL_REGISTRY.map(renderEditChannel)}
         </div>
     );

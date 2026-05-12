@@ -4,8 +4,6 @@ Revision ID: add_title_edit_util_model
 Revises: 5b0be8fbd941
 """
 from alembic import op
-import sqlalchemy as sa
-from sqlalchemy.dialects.postgresql import UUID
 
 revision = "add_title_edit_util_model"
 down_revision = "5b0be8fbd941"
