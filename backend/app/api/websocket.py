@@ -1,6 +1,7 @@
 """WebSocket chat endpoint for real-time agent conversations."""
 
 import json
+import re
 import uuid
 from datetime import datetime, timezone as tz
 
@@ -22,6 +23,174 @@ from app.services.chat_session_service import ensure_primary_platform_session
 from app.services.llm import call_llm, call_llm_with_failover
 
 router = APIRouter(tags=["websocket"])
+
+_SKILL_RE = re.compile(r"^/([a-z0-9_-]+(?::[a-z0-9_-]+)*)")
+
+
+async def _resolve_skill_content(
+    skill_key: str,
+    agent_id: uuid.UUID,
+) -> tuple[str | None, str | None, str | None]:
+    """Resolve skill content by colon key lookup."""
+    import asyncio
+
+    from app.services.agent_context import _agent_workspace
+    from app.services.skill_map import get_skill_map
+
+    skill_map = get_skill_map(agent_id)
+    entry = skill_map.get(skill_key)
+    if not entry:
+        return None, None, None
+
+    file_rel = entry.get("file")
+    if not file_rel:
+        return None, None, None
+
+    ws_root = _agent_workspace(agent_id)
+    file_path = (ws_root / "skills" / file_rel).resolve()
+    skills_root = (ws_root / "skills").resolve()
+    if not str(file_path).startswith(str(skills_root)):
+        return None, None, None
+    if not file_path.exists():
+        return None, None, None
+
+    content = await asyncio.to_thread(
+        file_path.read_text,
+        encoding="utf-8",
+        errors="replace",
+    )
+    return content, entry.get("name", skill_key), entry.get("emoji", "")
+
+
+async def _persist_and_inject_skill(
+    skill_content: str,
+    agent_id: uuid.UUID,
+    user_id: uuid.UUID,
+    conv_id: str,
+    db: AsyncSession,
+    conversation: list[dict],
+    websocket: WebSocket,
+) -> None:
+    """Persist a hidden user-context message and append it to the LLM conversation."""
+    hidden_msg = ChatMessage(
+        agent_id=agent_id,
+        user_id=user_id,
+        role="user",
+        content=skill_content,
+        conversation_id=conv_id,
+        is_hidden=True,
+    )
+    db.add(hidden_msg)
+    await db.commit()
+    conversation.append({"role": "user", "content": skill_content})
+    if not hasattr(websocket, "_hidden_indices"):
+        websocket._hidden_indices = set()
+    websocket._hidden_indices.add(len(conversation) - 1)
+
+
+async def _inject_skill_if_matched(
+    content: str,
+    agent_id: uuid.UUID,
+    user_id: uuid.UUID,
+    conv_id: str,
+    db: AsyncSession,
+    conversation: list[dict],
+    websocket: WebSocket,
+) -> None:
+    """Parse skill prefix from content and inject hidden context if found."""
+    match = _SKILL_RE.match(content)
+    if not match:
+        return
+
+    skill_key = match.group(1)
+    skill_content, display_name, emoji = await _resolve_skill_content(skill_key, agent_id)
+    if skill_content:
+        await _persist_and_inject_skill(skill_content, agent_id, user_id, conv_id, db, conversation, websocket)
+        await websocket.send_json(
+            {
+                "type": "skill_loaded",
+                "name": display_name,
+                "emoji": emoji or "",
+                "content": skill_content,
+            }
+        )
+    elif ":" in skill_key:
+        await websocket.send_json({"type": "skill_error", "message": f"Skill '{skill_key}' not found"})
+
+
+def _find_retry_anchor_message(messages: list, requested_message_id: str | None = None):
+    """Find the visible user message a retry/regenerate request should replay.
+
+    Rules:
+    - If `requested_message_id` points at a user message, retry that turn.
+    - If it points at an assistant/tool message, retry the nearest preceding
+      visible user message.
+    - If omitted, retry the most recent visible user message in the thread.
+    Hidden skill-injection messages are never used as retry anchors.
+    """
+    if not messages:
+        return None
+
+    target_index = len(messages) - 1
+    if requested_message_id:
+        requested = str(requested_message_id)
+        for idx, msg in enumerate(messages):
+            msg_id = getattr(msg, "id", None)
+            if msg_id and str(msg_id) == requested:
+                target_index = idx
+                break
+        else:
+            return None
+
+    for idx in range(target_index, -1, -1):
+        msg = messages[idx]
+        if getattr(msg, "role", None) == "user" and not getattr(msg, "is_hidden", False):
+            return msg
+    return None
+
+
+def _rebuild_conversation_from_messages(
+    messages: list,
+    conversation: list[dict],
+    websocket: WebSocket,
+) -> None:
+    """Rebuild the in-memory LLM conversation from persisted chat messages."""
+    conversation.clear()
+    websocket._hidden_indices = set()
+    for rmsg in messages:
+        if rmsg.role == "tool_call":
+            try:
+                tc_data = json.loads(rmsg.content)
+                tc_id = f"call_{rmsg.id}"
+                conversation.append(
+                    {
+                        "role": "assistant",
+                        "content": None,
+                        "tool_calls": [
+                            {
+                                "id": tc_id,
+                                "type": "function",
+                                "function": {
+                                    "name": tc_data.get("name", "unknown"),
+                                    "arguments": json.dumps(tc_data.get("args", {}), ensure_ascii=False),
+                                },
+                            }
+                        ],
+                    }
+                )
+                conversation.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": tc_id,
+                        "content": str(tc_data.get("result", ""))[:500],
+                    }
+                )
+            except Exception:
+                continue
+        else:
+            conversation.append({"role": rmsg.role, "content": rmsg.content})
+            if getattr(rmsg, "is_hidden", False):
+                websocket._hidden_indices.add(len(conversation) - 1)
 
 
 class ConnectionManager:
