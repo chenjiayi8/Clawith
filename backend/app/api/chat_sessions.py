@@ -4,11 +4,12 @@ import uuid
 from datetime import datetime, timezone as tz
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
-from sqlalchemy import select, func
+from sqlalchemy import cast, select, func, String
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.permissions import check_agent_access
 from app.core.security import get_current_user
 from app.database import get_db
 from app.models.audit import ChatMessage
@@ -19,9 +20,10 @@ from app.models.user import User
 router = APIRouter(prefix="/api/agents", tags=["chat-sessions"])
 
 
-def _is_admin_or_creator(user: User, agent: Agent) -> bool:
+def _can_view_all_agent_chat_sessions(user: User, agent: Agent) -> bool:
+    """Admins and the agent creator may list/view/delete other users' chat sessions."""
     return (
-        user.role in ("platform_admin", "org_admin")
+        user.role in ("platform_admin", "org_admin", "agent_admin")
         or str(agent.creator_id) == str(user.id)
     )
 
@@ -36,10 +38,15 @@ class SessionOut(BaseModel):
     created_at: str
     last_message_at: Optional[str] = None
     message_count: int = 0
+    unread_count: int = 0
+    is_primary: bool = False
     # Agent-to-agent session fields
     peer_agent_id: Optional[str] = None
     peer_agent_name: Optional[str] = None
     participant_type: str = "user"       # 'user' | 'agent'
+    # Group chat session fields
+    is_group: bool = False
+    group_name: Optional[str] = None
 
     class Config:
         from_attributes = True
@@ -60,15 +67,16 @@ async def list_sessions(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """List chat sessions for an agent. 'all' requires admin or creator role."""
+    """List chat sessions for an agent. scope=all for org/platform admins and agent_admin."""
     # Verify agent exists
     agent_result = await db.execute(select(Agent).where(Agent.id == agent_id))
     agent = agent_result.scalar_one_or_none()
     if not agent:
         raise HTTPException(status_code=404, detail="Agent not found")
+    await check_agent_access(db, current_user, agent_id)
 
     if scope == "all":
-        if not _is_admin_or_creator(current_user, agent):
+        if not _can_view_all_agent_chat_sessions(current_user, agent):
             raise HTTPException(status_code=403, detail="Not authorized to view all sessions")
 
         # Fetch all sessions (including agent-to-agent where this agent is peer)
@@ -82,40 +90,90 @@ async def list_sessions(
         )
         sessions = result.scalars().all()
         out = []
-        for session in sessions:
-            count_result = await db.execute(
-                select(func.count(ChatMessage.id)).where(
-                    ChatMessage.conversation_id == str(session.id),
-                )
+
+        # --- BULK FETCH: message counts, user names, agent names in 3 queries total ---
+        session_ids = [str(s.id) for s in sessions]
+        session_uuid_ids = [s.id for s in sessions]
+
+        message_counts: dict[str, int] = {}
+        unread_counts: dict[str, int] = {}
+        if session_ids:
+            count_res = await db.execute(
+                select(ChatMessage.conversation_id, func.count(ChatMessage.id))
+                .where(ChatMessage.conversation_id.in_(session_ids))
+                .group_by(ChatMessage.conversation_id)
             )
-            count = count_result.scalar() or 0
+            for row in count_res.all():
+                message_counts[row[0]] = row[1]
+
+            if any(str(s.user_id) == str(current_user.id) for s in sessions):
+                unread_res = await db.execute(
+                    select(ChatSession.id, func.count(ChatMessage.id))
+                    .join(ChatMessage, ChatMessage.conversation_id == cast(ChatSession.id, String))
+                    .where(
+                        ChatSession.id.in_(session_uuid_ids),
+                        ChatSession.user_id == current_user.id,
+                        ChatSession.source_channel.notin_(["agent", "trigger"]),
+                        ChatSession.is_group.is_(False),
+                        ChatMessage.role.in_(["assistant", "system", "tool_call"]),
+                        ChatMessage.created_at > func.coalesce(
+                            ChatSession.last_read_at_by_user,
+                            datetime(1970, 1, 1, tzinfo=tz.utc),
+                        ),
+                    )
+                    .group_by(ChatSession.id)
+                )
+                for row in unread_res.all():
+                    unread_counts[str(row[0])] = int(row[1] or 0)
+
+        # Collect IDs to resolve in bulk
+        from app.models.user import Identity
+        user_ids = list({s.user_id for s in sessions
+                         if not s.is_group and s.source_channel != "agent" and s.user_id})
+        user_names: dict[str, str] = {}
+        if user_ids:
+            user_r = await db.execute(
+                select(User.id, func.coalesce(User.display_name, Identity.username))
+                .join(Identity, User.identity_id == Identity.id)
+                .where(User.id.in_(user_ids))
+            )
+            for row in user_r.all():
+                user_names[str(row[0])] = row[1] or "Unknown"
+
+        agent_ids_to_fetch: set = set()
+        for s in sessions:
+            if s.source_channel == "agent" and s.peer_agent_id:
+                agent_ids_to_fetch.add(s.agent_id)
+                agent_ids_to_fetch.add(s.peer_agent_id)
+        agent_names: dict[str, str] = {}
+        if agent_ids_to_fetch:
+            agent_r = await db.execute(
+                select(Agent.id, Agent.name).where(Agent.id.in_(list(agent_ids_to_fetch)))
+            )
+            for row in agent_r.all():
+                agent_names[str(row[0])] = row[1] or "Agent"
+
+        for session in sessions:
+            count = message_counts.get(str(session.id), 0)
             if count == 0:
                 continue  # hide empty sessions
 
-            # Determine display name based on session type
             display = None
             peer_agent_id = None
             peer_agent_name = None
             participant_type = "user"
 
             if session.source_channel == "agent" and session.peer_agent_id:
-                # Agent-to-agent session
                 participant_type = "agent"
                 peer_agent_id = str(session.peer_agent_id)
-                # Get both agent names
-                a1_r = await db.execute(select(Agent.name).where(Agent.id == session.agent_id))
-                a2_r = await db.execute(select(Agent.name).where(Agent.id == session.peer_agent_id))
-                a1_name = a1_r.scalar_one_or_none() or "Agent"
-                a2_name = a2_r.scalar_one_or_none() or "Agent"
+                a1_name = agent_names.get(str(session.agent_id), "Agent")
+                a2_name = agent_names.get(str(session.peer_agent_id), "Agent")
                 peer_agent_name = a2_name
-                display = f"🤖 {a1_name} ↔ {a2_name}"
+                display = f"Agent {a1_name} - {a2_name}"
+            elif session.is_group:
+                display = session.group_name or session.title or "Group Chat"
             else:
-                # Human session — resolve username
-                user_r = await db.execute(
-                    select(func.coalesce(User.display_name, User.username))
-                    .where(User.id == session.user_id)
-                )
-                display = user_r.scalar_one_or_none() or "Unknown"
+                display = user_names.get(str(session.user_id), "Unknown")
 
             out.append(SessionOut(
                 id=str(session.id),
@@ -127,9 +185,13 @@ async def list_sessions(
                 created_at=session.created_at.isoformat(),
                 last_message_at=session.last_message_at.isoformat() if session.last_message_at else None,
                 message_count=count,
+                unread_count=unread_counts.get(str(session.id), 0),
+                is_primary=bool(getattr(session, "is_primary", False)),
                 peer_agent_id=peer_agent_id,
                 peer_agent_name=peer_agent_name,
-                participant_type=participant_type,
+                participant_type="group" if session.is_group else participant_type,
+                is_group=session.is_group,
+                group_name=session.group_name,
             ))
         return out
 
@@ -139,32 +201,56 @@ async def list_sessions(
             .where(
                 ChatSession.agent_id == agent_id,
                 ChatSession.user_id == current_user.id,
+                ChatSession.is_group.is_(False),  # Group sessions are not "mine"
                 ChatSession.source_channel.notin_(["agent", "trigger"]),  # Exclude agent-to-agent and reflection sessions
             )
             .order_by(ChatSession.last_message_at.desc().nulls_last(), ChatSession.created_at.desc())
         )
         sessions = result.scalars().all()
         out = []
+
+        # --- BULK FETCH: count total messages and unread messages in two compact queries ---
+        session_ids = [str(s.id) for s in sessions]
+        session_uuid_ids = [s.id for s in sessions]
+
+        total_counts: dict[str, int] = {}
+        unread_counts: dict[str, int] = {}
+        if session_ids:
+            counts_res = await db.execute(
+                select(
+                    ChatMessage.conversation_id,
+                    func.count(ChatMessage.id)
+                ).where(
+                    ChatMessage.conversation_id.in_(session_ids),
+                    ChatMessage.agent_id == agent_id
+                ).group_by(ChatMessage.conversation_id)
+            )
+            for row in counts_res.all():
+                total_counts[row[0]] = int(row[1] or 0)
+
+            unread_res = await db.execute(
+                select(ChatSession.id, func.count(ChatMessage.id))
+                .join(ChatMessage, ChatMessage.conversation_id == cast(ChatSession.id, String))
+                .where(
+                    ChatSession.id.in_(session_uuid_ids),
+                    ChatMessage.role.in_(["assistant", "system", "tool_call"]),
+                    ChatMessage.created_at > func.coalesce(
+                        ChatSession.last_read_at_by_user,
+                        datetime(1970, 1, 1, tzinfo=tz.utc),
+                    ),
+                )
+                .group_by(ChatSession.id)
+            )
+            for row in unread_res.all():
+                unread_counts[str(row[0])] = int(row[1] or 0)
+
         for session in sessions:
-            # Count only — skip sessions with no user messages (orphan assistant-only records)
-            count_result = await db.execute(
-                select(func.count(ChatMessage.id)).where(
-                    ChatMessage.conversation_id == str(session.id),
-                    ChatMessage.agent_id == agent_id,
-                    ChatMessage.role == "user",
-                )
-            )
-            user_msg_count = count_result.scalar() or 0
-            if user_msg_count == 0:
-                continue  # hide empty or orphan sessions
-            # Total message count for display
-            total_result = await db.execute(
-                select(func.count(ChatMessage.id)).where(
-                    ChatMessage.conversation_id == str(session.id),
-                    ChatMessage.agent_id == agent_id,
-                )
-            )
-            count = total_result.scalar() or 0
+            # Hide truly empty / orphan sessions. Onboarding sessions have zero
+            # user messages (the agent greets first) but do have assistant
+            # turns, so count ALL messages here — not just user ones.
+            count = total_counts.get(str(session.id), 0)
+            if count == 0:
+                continue
             out.append(SessionOut(
                 id=str(session.id),
                 agent_id=str(session.agent_id),
@@ -174,6 +260,8 @@ async def list_sessions(
                 created_at=session.created_at.isoformat(),
                 last_message_at=session.last_message_at.isoformat() if session.last_message_at else None,
                 message_count=count,
+                unread_count=unread_counts.get(str(session.id), 0),
+                is_primary=bool(session.is_primary),
             ))
         return out
 
@@ -186,10 +274,7 @@ async def create_session(
     db: AsyncSession = Depends(get_db),
 ):
     """Create a new chat session for the current user."""
-    agent_result = await db.execute(select(Agent).where(Agent.id == agent_id))
-    agent = agent_result.scalar_one_or_none()
-    if not agent:
-        raise HTTPException(status_code=404, detail="Agent not found")
+    await check_agent_access(db, current_user, agent_id)
 
     now = datetime.now(tz.utc)
     new_id = uuid.uuid4()
@@ -198,6 +283,8 @@ async def create_session(
         agent_id=agent_id,
         user_id=current_user.id,
         title=body.title or f"Session {now.strftime('%m-%d %H:%M')}",
+        source_channel="web",
+        is_primary=False,
         created_at=now,
     )
     db.add(session)
@@ -207,10 +294,15 @@ async def create_session(
         id=str(session.id),
         agent_id=str(session.agent_id),
         user_id=str(session.user_id),
+        source_channel=session.source_channel,
         title=session.title,
         created_at=session.created_at.isoformat(),
         last_message_at=None,
         message_count=0,
+        unread_count=0,
+        is_primary=False,
+        participant_type="user",
+        is_group=False,
     )
 
 
@@ -222,7 +314,8 @@ async def rename_session(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Rename a session. Only owner, admin, or creator can rename."""
+    """Rename a session. Owner, agent creator, or admin may rename others' sessions."""
+    agent, _ = await check_agent_access(db, current_user, agent_id)
     result = await db.execute(
         select(ChatSession).where(ChatSession.id == session_id, ChatSession.agent_id == agent_id)
     )
@@ -230,10 +323,7 @@ async def rename_session(
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
 
-    agent_result = await db.execute(select(Agent).where(Agent.id == agent_id))
-    agent = agent_result.scalar_one_or_none()
-
-    if str(session.user_id) != str(current_user.id) and not _is_admin_or_creator(current_user, agent):
+    if str(session.user_id) != str(current_user.id) and not _can_view_all_agent_chat_sessions(current_user, agent):
         raise HTTPException(status_code=403, detail="Not authorized")
 
     session.title = body.title
@@ -249,7 +339,8 @@ async def delete_session(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Delete a chat session and its messages. Owner, admin, or creator only."""
+    """Delete a chat session and its messages. Owner, agent creator, or admin may delete others' sessions."""
+    agent, _ = await check_agent_access(db, current_user, agent_id)
     result = await db.execute(
         select(ChatSession).where(ChatSession.id == session_id, ChatSession.agent_id == agent_id)
     )
@@ -257,10 +348,7 @@ async def delete_session(
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
 
-    agent_result = await db.execute(select(Agent).where(Agent.id == agent_id))
-    agent = agent_result.scalar_one_or_none()
-
-    if str(session.user_id) != str(current_user.id) and not _is_admin_or_creator(current_user, agent):
+    if str(session.user_id) != str(current_user.id) and not _can_view_all_agent_chat_sessions(current_user, agent):
         raise HTTPException(status_code=403, detail="Not authorized")
 
     # Delete associated messages first
@@ -279,6 +367,7 @@ async def get_session_messages(
     db: AsyncSession = Depends(get_db),
 ):
     """Get chat messages for a specific session."""
+    agent, _ = await check_agent_access(db, current_user, agent_id)
     # Allow looking up sessions where agent_id OR peer_agent_id matches
     result = await db.execute(
         select(ChatSession).where(
@@ -290,20 +379,31 @@ async def get_session_messages(
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
 
-    # Permission: owner, admin, or creator can view
-    agent_result = await db.execute(select(Agent).where(Agent.id == agent_id))
-    agent = agent_result.scalar_one_or_none()
-    if str(session.user_id) != str(current_user.id) and not _is_admin_or_creator(current_user, agent):
+    # Permission: session owner, agent creator, or admin.
+    if str(session.user_id) != str(current_user.id) and not _can_view_all_agent_chat_sessions(current_user, agent):
         raise HTTPException(status_code=403, detail="Not authorized to view this session")
 
     # Query messages by conversation_id only (agent-to-agent uses session_agent_id)
+    # Query the latest 500 messages (subquery in DESC, then reverse for display order)
+    from sqlalchemy import desc
+    latest_subq = (
+        select(ChatMessage.id)
+        .where(ChatMessage.conversation_id == str(session_id))
+        .order_by(desc(ChatMessage.created_at))
+        .limit(500)
+        .subquery()
+    )
     msgs_result = await db.execute(
         select(ChatMessage)
-        .where(ChatMessage.conversation_id == str(session_id))
+        .where(ChatMessage.id.in_(select(latest_subq.c.id)))
         .order_by(ChatMessage.created_at.asc())
-        .limit(500)
     )
     messages = msgs_result.scalars().all()
+
+    # Reading your own first-party/channel session should clear its unread state.
+    if str(session.user_id) == str(current_user.id) and not session.is_group and session.source_channel not in ("agent", "trigger"):
+        session.last_read_at_by_user = datetime.now(tz.utc)
+        await db.commit()
 
     # Resolve sender names for agent sessions
     sender_cache: dict = {}
@@ -317,10 +417,18 @@ async def get_session_messages(
     out = []
     for m in messages:
         sender_name = sender_cache.get(str(m.participant_id)) if m.participant_id else None
+        message_id = getattr(m, "id", None)
+        message_id_str = str(message_id) if message_id else None
 
         if m.role == "tool_call":
             import json
-            entry: dict = {"id": str(m.id), "role": m.role, "content": m.content, "created_at": m.created_at.isoformat() if m.created_at else None}
+            entry: dict = {
+                "role": m.role,
+                "content": m.content,
+                "created_at": m.created_at.isoformat() if m.created_at else None,
+            }
+            if message_id_str:
+                entry["id"] = message_id_str
             try:
                 data = json.loads(m.content)
                 entry["content"] = ""
@@ -328,9 +436,10 @@ async def get_session_messages(
                 entry["toolArgs"] = data.get("args")
                 entry["toolStatus"] = data.get("status", "done")
                 entry["toolResult"] = data.get("result", "")
+                entry["toolThinking"] = data.get("reasoning_content", "")
             except Exception:
                 pass
-            if getattr(m, 'is_hidden', False):
+            if getattr(m, "is_hidden", False):
                 entry["is_hidden"] = True
             if sender_name:
                 entry["sender_name"] = sender_name
@@ -345,10 +454,18 @@ async def get_session_messages(
                     part["sender_name"] = sender_name
                 if m.participant_id:
                     part["participant_id"] = str(m.participant_id)
+                if getattr(m, "is_hidden", False):
+                    part["is_hidden"] = True
                 out.append(part)
         else:
-            entry = {"id": str(m.id), "role": m.role, "content": m.content, "created_at": m.created_at.isoformat() if m.created_at else None}
-            if getattr(m, 'is_hidden', False):
+            entry = {
+                "role": m.role,
+                "content": m.content,
+                "created_at": m.created_at.isoformat() if m.created_at else None,
+            }
+            if message_id_str:
+                entry["id"] = message_id_str
+            if getattr(m, "is_hidden", False):
                 entry["is_hidden"] = True
             if hasattr(m, 'thinking') and m.thinking:
                 entry["thinking"] = m.thinking

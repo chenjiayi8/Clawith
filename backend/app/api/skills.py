@@ -2,8 +2,11 @@
 
 import asyncio
 import base64
-import logging
+import io
+import os
 import re
+import zipfile
+from pathlib import Path
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException
@@ -13,14 +16,13 @@ from sqlalchemy.orm import selectinload
 
 from app.database import async_session
 from app.models.skill import Skill, SkillFile
-from app.core.security import require_role, get_current_user
+from app.core.security import get_current_admin, get_current_user, require_role
 from app.models.user import User
-
-logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/skills", tags=["skills"])
 
-CLAWHUB_BASE = "https://clawhub.ai/api"
+CLAWHUB_BASE = os.getenv("CLAWHUB_BASE", "https://clawhub.ai/api").rstrip("/")
+CLAWHUB_MIRROR_BASE = os.getenv("CLAWHUB_MIRROR_BASE", "https://cn.clawhub-mirror.com/api").rstrip("/")
 GITHUB_API = "https://api.github.com"
 
 MAX_SKILL_SIZE = 512_000  # 500 KB total limit per skill
@@ -62,6 +64,182 @@ def _clawhub_headers(api_key: str) -> dict:
     if api_key:
         return {"Authorization": f"Bearer {api_key}"}
     return {}
+
+
+def _clawhub_headers_for_base(api_key: str, base_url: str) -> dict:
+    """Only send the official ClawHub API key to official ClawHub endpoints."""
+    if "clawhub-mirror.com" in base_url:
+        return {}
+    return _clawhub_headers(api_key)
+
+
+def _candidate_clawhub_bases(preferred: str | None = None) -> list[str]:
+    """Return ClawHub API bases in fallback order without duplicates."""
+    bases = [preferred, CLAWHUB_BASE, CLAWHUB_MIRROR_BASE]
+    result: list[str] = []
+    for base in bases:
+        if not base:
+            continue
+        normalized = base.rstrip("/")
+        if normalized not in result:
+            result.append(normalized)
+    return result
+
+
+def _clawhub_search_endpoint(base_url: str) -> str:
+    """The China mirror serves search under /v1/search, while clawhub.ai keeps /search."""
+    if "clawhub-mirror.com" in base_url:
+        return f"{base_url}/v1/search"
+    return f"{base_url}/search"
+
+
+def _clawhub_skill_url(base_url: str, slug: str) -> str:
+    return f"{base_url}/v1/skills/{slug}"
+
+
+def _clawhub_download_url(base_url: str) -> str:
+    return f"{base_url}/v1/download"
+
+
+def _public_clawhub_url(base_url: str, slug: str) -> str:
+    if "clawhub-mirror.com" in base_url:
+        return f"https://cn.clawhub-mirror.com/skills/{slug}"
+    return f"https://clawhub.ai/skills/{slug}"
+
+
+def _extract_clawhub_zip_files(data: bytes) -> list[dict]:
+    """Convert a ClawHub skill zip into [{"path", "content"}] records."""
+    files: list[dict] = []
+    total_size = 0
+
+    try:
+        archive = zipfile.ZipFile(io.BytesIO(data))
+    except zipfile.BadZipFile as exc:
+        raise HTTPException(502, "ClawHub download did not return a valid skill archive") from exc
+
+    entries = [info for info in archive.infolist() if not info.is_dir()]
+    raw_paths = [Path(info.filename) for info in entries]
+    strip_prefix = ""
+    if raw_paths:
+        first_parts = raw_paths[0].parts
+        if len(first_parts) > 1:
+            candidate = first_parts[0]
+            has_root_skill = any(p.name.upper() == "SKILL.MD" and len(p.parts) == 1 for p in raw_paths)
+            has_prefixed_skill = any(
+                len(p.parts) > 1 and p.parts[0] == candidate and p.parts[-1].upper() == "SKILL.MD"
+                for p in raw_paths
+            )
+            all_share_prefix = all(len(p.parts) > 1 and p.parts[0] == candidate for p in raw_paths)
+            if not has_root_skill and has_prefixed_skill and all_share_prefix:
+                strip_prefix = f"{candidate}/"
+
+    for info in entries:
+        rel = info.filename.lstrip("/")
+        if strip_prefix and rel.startswith(strip_prefix):
+            rel = rel[len(strip_prefix):]
+        path = Path(rel)
+        if not rel or path.is_absolute() or ".." in path.parts:
+            continue
+
+        total_size += info.file_size
+        if total_size > MAX_SKILL_SIZE:
+            raise HTTPException(413, f"Skill exceeds size limit ({MAX_SKILL_SIZE // 1024}KB)")
+
+        content = archive.read(info).decode("utf-8", errors="replace")
+        files.append({"path": rel, "content": content})
+
+    if not any(f["path"].upper() == "SKILL.MD" for f in files):
+        raise HTTPException(400, "No SKILL.md found in ClawHub archive — not a valid skill package")
+    return files
+
+
+async def _fetch_clawhub_json(
+    path_builder,
+    api_key: str = "",
+    preferred_base: str | None = None,
+    params: dict | None = None,
+) -> tuple[dict, str]:
+    """Fetch JSON from ClawHub, falling back to the mirror when available."""
+    last_error = ""
+    for base_url in _candidate_clawhub_bases(preferred_base):
+        try:
+            async with httpx.AsyncClient(timeout=15) as client:
+                resp = await client.get(
+                    path_builder(base_url),
+                    params=params,
+                    headers=_clawhub_headers_for_base(api_key, base_url),
+                )
+            content_type = resp.headers.get("content-type", "")
+            if resp.status_code == 404:
+                last_error = f"ClawHub not found at {base_url}"
+                continue
+            if resp.status_code == 429:
+                last_error = f"ClawHub rate limit exceeded at {base_url}"
+                continue
+            if resp.status_code == 200 and "json" in content_type:
+                return resp.json(), base_url
+            last_error = f"ClawHub API error from {base_url}: HTTP {resp.status_code}"
+        except HTTPException:
+            raise
+        except Exception as exc:
+            last_error = f"Failed to connect to ClawHub at {base_url}: {exc}"
+    if "rate limit" in last_error:
+        raise HTTPException(429, "ClawHub rate limit exceeded. Please wait a moment and try again.")
+    raise HTTPException(502, last_error or "Failed to connect to ClawHub")
+
+
+async def _fetch_clawhub_skill_meta(
+    slug: str,
+    api_key: str = "",
+    preferred_base: str | None = None,
+) -> tuple[dict, str]:
+    return await _fetch_clawhub_json(
+        lambda base_url: _clawhub_skill_url(base_url, slug),
+        api_key=api_key,
+        preferred_base=preferred_base,
+    )
+
+
+async def _fetch_clawhub_skill_archive(
+    slug: str,
+    api_key: str = "",
+    preferred_base: str | None = None,
+    version: str | None = None,
+    tag: str | None = None,
+) -> tuple[list[dict], str]:
+    """Download a ClawHub skill archive from official API or mirror."""
+    params = {"slug": slug}
+    if version:
+        params["version"] = version
+    if tag:
+        params["tag"] = tag
+
+    last_error = ""
+    for base_url in _candidate_clawhub_bases(preferred_base):
+        try:
+            async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
+                resp = await client.get(
+                    _clawhub_download_url(base_url),
+                    params=params,
+                    headers=_clawhub_headers_for_base(api_key, base_url),
+                )
+            content_type = resp.headers.get("content-type", "")
+            if resp.status_code == 404:
+                last_error = f"Skill '{slug}' not found on ClawHub at {base_url}"
+                continue
+            if resp.status_code == 429:
+                last_error = f"ClawHub rate limit exceeded at {base_url}"
+                continue
+            if resp.status_code == 200 and ("zip" in content_type or resp.content.startswith(b"PK")):
+                return _extract_clawhub_zip_files(resp.content), base_url
+            last_error = f"ClawHub download failed from {base_url}: HTTP {resp.status_code}"
+        except HTTPException:
+            raise
+        except Exception as exc:
+            last_error = f"Failed to download ClawHub skill from {base_url}: {exc}"
+    if "rate limit" in last_error:
+        raise HTTPException(429, "ClawHub rate limit exceeded. Please wait a moment and try again.")
+    raise HTTPException(502, last_error or f"Failed to download skill '{slug}' from ClawHub")
 
 
 class SkillFileIn(BaseModel):
@@ -136,6 +314,30 @@ def _parse_github_url(url: str) -> dict | None:
     if m:
         return {"owner": m.group(1), "repo": m.group(2), "branch": "main", "path": ""}
     return None
+
+
+def _apply_skill_scope(query, current_user: User):
+    """Scope skill queries for tenant admins while leaving platform admins unrestricted."""
+    from sqlalchemy import or_ as _or
+
+    if current_user.role == "platform_admin" or not current_user.tenant_id:
+        return query
+    return query.where(_or(Skill.tenant_id.is_(None), Skill.tenant_id == current_user.tenant_id))
+
+
+def _ensure_skill_write_access(skill: Skill, current_user: User):
+    """Allow platform admins to edit everything; tenant admins can edit
+    tenant-owned skills AND builtin (preset) skills visible to their tenant.
+    Builtin skills are treated as presets -- placed during company init,
+    but fully manageable by org_admin afterwards.
+    """
+    if current_user.role == "platform_admin":
+        return
+    if not current_user.tenant_id:
+        raise HTTPException(403, "Cannot modify skills without a tenant")
+    # Allow org_admin to manage: their own tenant skills OR builtin (preset) skills
+    if skill.tenant_id is not None and skill.tenant_id != current_user.tenant_id:
+        raise HTTPException(403, "Cannot modify other-tenant skills")
 
 
 async def _fetch_github_directory(
@@ -227,7 +429,7 @@ async def _save_skill_to_db(
         if tenant_id:
             conflict_q = conflict_q.where(Skill.tenant_id == _uuid.UUID(tenant_id))
         else:
-            conflict_q = conflict_q.where(Skill.tenant_id == None)
+            conflict_q = conflict_q.where(Skill.tenant_id.is_(None))
         existing = await db.execute(conflict_q)
         if existing.scalar_one_or_none():
             raise HTTPException(
@@ -264,11 +466,11 @@ async def search_clawhub(q: str, current_user: User = Depends(get_current_user))
     """Proxy search requests to the ClawHub API."""
     tenant_id = str(current_user.tenant_id) if current_user.tenant_id else None
     api_key = await _get_clawhub_key(tenant_id)
-    async with httpx.AsyncClient(timeout=15) as client:
-        resp = await client.get(f"{CLAWHUB_BASE}/search", params={"q": q}, headers=_clawhub_headers(api_key))
-        if resp.status_code != 200:
-            raise HTTPException(502, f"ClawHub search failed: {resp.status_code}")
-        data = resp.json()
+    data, _ = await _fetch_clawhub_json(
+        _clawhub_search_endpoint,
+        api_key=api_key,
+        params={"q": q},
+    )
     results = data.get("results", [])
     return [
         {
@@ -276,6 +478,8 @@ async def search_clawhub(q: str, current_user: User = Depends(get_current_user))
             "displayName": r.get("displayName"),
             "summary": r.get("summary"),
             "score": r.get("score"),
+            "version": r.get("version"),
+            "updatedAt": r.get("updatedAt"),
         }
         for r in results
     ]
@@ -287,15 +491,8 @@ async def clawhub_detail(slug: str, current_user: User = Depends(get_current_use
     tenant_id = str(current_user.tenant_id) if current_user.tenant_id else None
     api_key = await _get_clawhub_key(tenant_id)
     try:
-        async with httpx.AsyncClient(timeout=15) as client:
-            resp = await client.get(f"{CLAWHUB_BASE}/v1/skills/{slug}", headers=_clawhub_headers(api_key))
-            if resp.status_code == 404:
-                raise HTTPException(404, f"Skill '{slug}' not found on ClawHub")
-            if resp.status_code == 429:
-                raise HTTPException(429, "ClawHub rate limit exceeded. Please wait a moment and try again.")
-            if resp.status_code != 200:
-                raise HTTPException(502, f"ClawHub API error: {resp.status_code}")
-            return resp.json()
+        data, _ = await _fetch_clawhub_skill_meta(slug, api_key=api_key)
+        return data
     except HTTPException:
         raise
     except Exception as e:
@@ -305,30 +502,17 @@ async def clawhub_detail(slug: str, current_user: User = Depends(get_current_use
 @router.post("/clawhub/install")
 async def install_from_clawhub(body: ClawhubInstallIn, current_user: User = Depends(get_current_user)):
     """Install a skill from ClawHub into the global registry."""
-    # Resolve tenant GitHub token
     tenant_id = str(current_user.tenant_id) if current_user.tenant_id else None
-    token = await _get_github_token(tenant_id)
     slug = body.slug
 
     # 1. Fetch metadata from ClawHub (with retry for rate limits)
     api_key = await _get_clawhub_key(tenant_id)
-    ch_headers = _clawhub_headers(api_key)
     meta = None
+    meta_base = None
     for attempt in range(3):
         try:
-            async with httpx.AsyncClient(timeout=15) as client:
-                resp = await client.get(f"{CLAWHUB_BASE}/v1/skills/{slug}", headers=ch_headers)
-                if resp.status_code == 404:
-                    raise HTTPException(404, f"Skill '{slug}' not found on ClawHub")
-                if resp.status_code == 429:
-                    if attempt < 2:
-                        await asyncio.sleep(1 + attempt)  # 1s, 2s backoff
-                        continue
-                    raise HTTPException(429, "ClawHub rate limit exceeded. Please wait a moment and try again.")
-                if resp.status_code != 200:
-                    raise HTTPException(502, f"ClawHub API error: {resp.status_code}")
-                meta = resp.json()
-                break
+            meta, meta_base = await _fetch_clawhub_skill_meta(slug, api_key=api_key)
+            break
         except HTTPException:
             raise
         except Exception as e:
@@ -349,20 +533,11 @@ async def install_from_clawhub(body: ClawhubInstallIn, current_user: User = Depe
     is_suspicious = moderation.get("isSuspicious", False)
     moderation_summary = moderation.get("summary", "")
 
-    # 3. Fetch files from GitHub archive
-    github_path = f"skills/{handle}/{slug}"
-    try:
-        files = await _fetch_github_directory("openclaw", "skills", github_path, "main", token=token)
-    except HTTPException as e:
-        if e.status_code == 404:
-            raise HTTPException(
-                404, f"Skill files not found in GitHub archive at {github_path}. "
-                     "Try importing via URL instead."
-            )
-        raise
+    # 3. Fetch files from the ClawHub archive
+    files, archive_base = await _fetch_clawhub_skill_archive(slug, api_key=api_key, preferred_base=meta_base)
 
     if not files:
-        raise HTTPException(404, "No files found in the skill directory")
+        raise HTTPException(404, "No files found in the ClawHub skill archive")
 
     # 4. Extract name/description from SKILL.md
     skill_md = next((f for f in files if f["path"].upper() == "SKILL.MD"), None)
@@ -386,7 +561,7 @@ async def install_from_clawhub(body: ClawhubInstallIn, current_user: User = Depe
         category=tier_labels.get(tier, "clawhub"),
         icon="",
         files=files,
-        source_url=f"https://clawhub.ai/skills/{slug}",
+        source_url=_public_clawhub_url(archive_base, slug),
         tenant_id=tenant_id,
     )
 
@@ -396,6 +571,7 @@ async def install_from_clawhub(body: ClawhubInstallIn, current_user: User = Depe
     result["has_scripts"] = has_scripts
     result["file_count"] = len(files)
     result["source"] = "clawhub"
+    result["archive_source"] = archive_base
     return result
 
 
@@ -492,7 +668,7 @@ async def list_skills(current_user: User = Depends(get_current_user)):
         query = select(Skill).order_by(Skill.name)
         # Scope by tenant: show builtin (tenant_id is NULL) + tenant-specific skills
         if tenant_id:
-            query = query.where(_or(Skill.tenant_id == None, Skill.tenant_id == _uuid.UUID(tenant_id)))
+            query = query.where(_or(Skill.tenant_id.is_(None), Skill.tenant_id == _uuid.UUID(tenant_id)))
         result = await db.execute(query)
         skills = result.scalars().all()
         return [
@@ -512,12 +688,11 @@ async def list_skills(current_user: User = Depends(get_current_user)):
 
 
 @router.get("/{skill_id}")
-async def get_skill(skill_id: str):
+async def get_skill(skill_id: str, current_user: User = Depends(get_current_user)):
     """Get a skill with its files."""
     async with async_session() as db:
-        result = await db.execute(
-            select(Skill).where(Skill.id == skill_id).options(selectinload(Skill.files))
-        )
+        query = select(Skill).where(Skill.id == skill_id).options(selectinload(Skill.files))
+        result = await db.execute(_apply_skill_scope(query, current_user))
         skill = result.scalar_one_or_none()
         if not skill:
             raise HTTPException(404, "Skill not found")
@@ -537,7 +712,7 @@ async def get_skill(skill_id: str):
 
 
 @router.post("/")
-async def create_skill(body: SkillCreateIn, _=Depends(require_role("platform_admin"))):
+async def create_skill(body: SkillCreateIn, current_user: User = Depends(get_current_admin)):
     """Create a custom skill."""
     async with async_session() as db:
         skill = Skill(
@@ -547,6 +722,7 @@ async def create_skill(body: SkillCreateIn, _=Depends(require_role("platform_adm
             icon=body.icon,
             folder_name=body.folder_name,
             is_builtin=False,
+            tenant_id=current_user.tenant_id,
         )
         db.add(skill)
         await db.flush()
@@ -575,15 +751,15 @@ class SkillUpdateIn(BaseModel):
 
 
 @router.put("/{skill_id}")
-async def update_skill(skill_id: str, body: SkillUpdateIn, _=Depends(require_role("platform_admin"))):
+async def update_skill(skill_id: str, body: SkillUpdateIn, current_user: User = Depends(get_current_admin)):
     """Update a skill's metadata and/or files."""
     async with async_session() as db:
-        result = await db.execute(
-            select(Skill).where(Skill.id == skill_id).options(selectinload(Skill.files))
-        )
+        query = select(Skill).where(Skill.id == skill_id).options(selectinload(Skill.files))
+        result = await db.execute(_apply_skill_scope(query, current_user))
         skill = result.scalar_one_or_none()
         if not skill:
             raise HTTPException(404, "Skill not found")
+        _ensure_skill_write_access(skill, current_user)
 
         if body.name is not None:
             skill.name = body.name
@@ -607,15 +783,15 @@ async def update_skill(skill_id: str, body: SkillUpdateIn, _=Depends(require_rol
 
 
 @router.delete("/{skill_id}")
-async def delete_skill(skill_id: str, _=Depends(require_role("platform_admin"))):
+async def delete_skill(skill_id: str, current_user: User = Depends(get_current_admin)):
     """Delete a skill (not builtin)."""
     async with async_session() as db:
-        result = await db.execute(select(Skill).where(Skill.id == skill_id))
+        query = select(Skill).where(Skill.id == skill_id)
+        result = await db.execute(_apply_skill_scope(query, current_user))
         skill = result.scalar_one_or_none()
         if not skill:
             raise HTTPException(404, "Skill not found")
-        if skill.is_builtin:
-            raise HTTPException(400, "Cannot delete builtin skill")
+        _ensure_skill_write_access(skill, current_user)
         await db.delete(skill)
         await db.commit()
         return {"ok": True}
@@ -659,7 +835,7 @@ def _mask_token(token: str) -> str:
 
 @router.get("/settings/token")
 async def get_skill_token_status(
-    current_user=Depends(require_role("platform_admin")),
+    current_user=Depends(require_role("org_admin", "platform_admin")),
 ):
     """Check if GitHub token and ClawHub key are configured for this tenant."""
     tenant_id = str(current_user.tenant_id) if current_user.tenant_id else None
@@ -677,9 +853,14 @@ async def get_skill_token_status(
 @router.put("/settings/token")
 async def set_skill_token(
     body: SkillSettingsIn,
-    current_user=Depends(require_role("platform_admin")),
+    current_user=Depends(require_role("org_admin", "platform_admin")),
 ):
-    """Save GitHub token and/or ClawHub key for this tenant."""
+    """Save GitHub token and/or ClawHub key for this tenant.
+
+    Accessible by org_admin (to manage their own company's credentials) and
+    platform_admin. require_role performs exact-match checks, so both roles
+    must be listed explicitly.
+    """
     if not current_user.tenant_id:
         raise HTTPException(400, "No tenant associated")
 
@@ -704,7 +885,7 @@ async def browse_list(path: str = "", current_user: User = Depends(get_current_u
             # Root: list all skill folders (scoped by tenant)
             query = select(Skill).order_by(Skill.name)
             if tenant_id:
-                query = query.where(_or(Skill.tenant_id == None, Skill.tenant_id == _uuid.UUID(tenant_id)))
+                query = query.where(_or(Skill.tenant_id.is_(None), Skill.tenant_id == _uuid.UUID(tenant_id)))
             result = await db.execute(query)
             skills = result.scalars().all()
             return [
@@ -718,7 +899,7 @@ async def browse_list(path: str = "", current_user: User = Depends(get_current_u
         # Resolve skill folder scoped by tenant
         skill_q = select(Skill).where(Skill.folder_name == folder).options(selectinload(Skill.files))
         if tenant_id:
-            skill_q = skill_q.where(_or(Skill.tenant_id == None, Skill.tenant_id == _uuid.UUID(tenant_id)))
+            skill_q = skill_q.where(_or(Skill.tenant_id.is_(None), Skill.tenant_id == _uuid.UUID(tenant_id)))
         result = await db.execute(skill_q)
         skill = result.scalar_one_or_none()
         if not skill:
@@ -766,7 +947,7 @@ async def browse_read(path: str, current_user: User = Depends(get_current_user))
     async with async_session() as db:
         skill_q = select(Skill).where(Skill.folder_name == folder).options(selectinload(Skill.files))
         if tenant_id:
-            skill_q = skill_q.where(_or(Skill.tenant_id == None, Skill.tenant_id == _uuid.UUID(tenant_id)))
+            skill_q = skill_q.where(_or(Skill.tenant_id.is_(None), Skill.tenant_id == _uuid.UUID(tenant_id)))
         result = await db.execute(skill_q)
         skill = result.scalar_one_or_none()
         if not skill:
@@ -783,21 +964,17 @@ class BrowseWriteIn(BaseModel):
 
 
 @router.put("/browse/write")
-async def browse_write(body: BrowseWriteIn, current_user: User = Depends(require_role("platform_admin"))):
+async def browse_write(body: BrowseWriteIn, current_user: User = Depends(get_current_admin)):
     """Write a file in a skill folder. Creates the skill if the folder doesn't exist."""
-    import uuid as _uuid
-    from sqlalchemy import or_ as _or
-    tenant_id = str(current_user.tenant_id) if current_user.tenant_id else None
     parts = body.path.strip("/").split("/", 1)
     if len(parts) < 2:
         raise HTTPException(400, "Path must include folder and file")
     folder, file_path = parts
     async with async_session() as db:
         skill_q = select(Skill).where(Skill.folder_name == folder).options(selectinload(Skill.files))
-        if tenant_id:
-            skill_q = skill_q.where(_or(Skill.tenant_id == None, Skill.tenant_id == _uuid.UUID(tenant_id)))
-        result = await db.execute(skill_q)
+        result = await db.execute(_apply_skill_scope(skill_q, current_user))
         skill = result.scalar_one_or_none()
+        created_new_skill = False
         if not skill:
             # Auto-create skill from folder name, scoped to tenant
             skill = Skill(
@@ -811,13 +988,17 @@ async def browse_write(body: BrowseWriteIn, current_user: User = Depends(require
             )
             db.add(skill)
             await db.flush()
+            created_new_skill = True
+        else:
+            _ensure_skill_write_access(skill, current_user)
 
         # Upsert file
         existing = None
-        for f in skill.files:
-            if f.path == file_path:
-                existing = f
-                break
+        if not created_new_skill:
+            for f in skill.files:
+                if f.path == file_path:
+                    existing = f
+                    break
         if existing:
             existing.content = body.content
         else:
@@ -827,23 +1008,17 @@ async def browse_write(body: BrowseWriteIn, current_user: User = Depends(require
 
 
 @router.delete("/browse/delete")
-async def browse_delete(path: str, current_user: User = Depends(require_role("platform_admin"))):
+async def browse_delete(path: str, current_user: User = Depends(get_current_admin)):
     """Delete a file or an entire skill folder."""
-    import uuid as _uuid
-    from sqlalchemy import or_ as _or
-    tenant_id = str(current_user.tenant_id) if current_user.tenant_id else None
     parts = path.strip("/").split("/", 1)
     folder = parts[0]
     async with async_session() as db:
         skill_q = select(Skill).where(Skill.folder_name == folder).options(selectinload(Skill.files))
-        if tenant_id:
-            skill_q = skill_q.where(_or(Skill.tenant_id == None, Skill.tenant_id == _uuid.UUID(tenant_id)))
-        result = await db.execute(skill_q)
+        result = await db.execute(_apply_skill_scope(skill_q, current_user))
         skill = result.scalar_one_or_none()
         if not skill:
             raise HTTPException(404, "Skill not found")
-        if skill.is_builtin and len(parts) == 1:
-            raise HTTPException(400, "Cannot delete builtin skill")
+        _ensure_skill_write_access(skill, current_user)
 
         if len(parts) == 1:
             # Delete entire skill

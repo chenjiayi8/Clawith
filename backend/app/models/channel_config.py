@@ -3,7 +3,7 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, Enum, ForeignKey, String, Text, UniqueConstraint, func
+from sqlalchemy import DateTime, Enum, ForeignKey, String, UniqueConstraint, func
 from sqlalchemy.dialects.postgresql import JSON, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -18,7 +18,7 @@ class ChannelConfig(Base):
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     agent_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("agents.id"), nullable=False, index=True)
     channel_type: Mapped[str] = mapped_column(
-        Enum("feishu", "wecom", "dingtalk", "slack", "discord","atlassian", "microsoft_teams", name="channel_type_enum"),
+        Enum("feishu", "wecom", "wechat", "whatsapp", "dingtalk", "slack", "discord","atlassian", "microsoft_teams", "agentbay", name="channel_type_enum"),
         default="feishu",
         nullable=False,
     )
@@ -27,7 +27,7 @@ class ChannelConfig(Base):
 
     # Feishu specific config
     app_id: Mapped[str | None] = mapped_column(String(255))
-    app_secret: Mapped[str | None] = mapped_column(String(255))
+    app_secret: Mapped[str | None] = mapped_column(String(512))
     encrypt_key: Mapped[str | None] = mapped_column(String(255))
     verification_token: Mapped[str | None] = mapped_column(String(255))
 

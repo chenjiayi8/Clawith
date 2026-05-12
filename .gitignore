@@ -1,13 +1,18 @@
 # ClawCrew
+# Shared workspace build and cache outputs
 node_modules/
 dist/
 *.zip
+.vite/
+*.log
 build/
 __pycache__/
 *.pyc
 .env
 .venv/
 .vscode/
+.claude/
+.superset/
 venv/
 *.egg-info/
 .pytest_cache/
@@ -22,7 +27,6 @@ ss-nodes.json
 .data/
 
 # Ignore Antigravity / Claude Code agent configurations
-.claude/
 .agent/
 .agents/
 _agent/
@@ -30,6 +34,7 @@ _agents/
 
 # Internal docs
 docs/
+.agents/rules/deploy.md
 
 # Runtime data (postgres, redis, agent workspaces)
 data/

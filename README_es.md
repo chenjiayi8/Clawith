@@ -1,8 +1,9 @@
 <p align="center">
-  <img src="assets/Clawith_slogan.png" alt="Clawith — OpenClaw for Teams" width="800" />
+  <img src="assets/slogan.png" alt="Clawith — OpenClaw for Teams" width="800" />
 </p>
 
 <p align="center">
+  <a href="https://www.clawith.ai/blog/clawith-technical-whitepaper"><img src="https://img.shields.io/badge/Technical%20Whitepaper-Read-8A2BE2" alt="Technical Whitepaper" /></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-Apache%202.0-blue.svg" alt="Apache 2.0 License" /></a>
   <a href="https://github.com/dataelement/Clawith/stargazers"><img src="https://img.shields.io/github/stars/dataelement/Clawith?style=flat&color=gold" alt="GitHub Stars" /></a>
   <a href="https://github.com/dataelement/Clawith/network/members"><img src="https://img.shields.io/github/forks/dataelement/Clawith?style=flat&color=slateblue" alt="GitHub Forks" /></a>
@@ -117,7 +118,7 @@ Cambiar contraseñas predeterminadas · Configurar `SECRET_KEY` / `JWT_SECRET_KE
 También puedes escanear el código QR a continuación para unirte a nuestra comunidad desde tu móvil:
 
 <p align="center">
-  <img src="assets/QR_Code.png" alt="Código QR de la Comunidad" width="200" />
+  <img src="assets/Clawith_QRcode.png" alt="Código QR de la Comunidad" width="200" />
 </p>
 
 ## ⭐ Star History

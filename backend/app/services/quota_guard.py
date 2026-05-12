@@ -178,7 +178,7 @@ async def check_agent_creation_quota(user_id: uuid.UUID) -> None:
         count_result = await db.execute(
             select(sa_func.count()).select_from(Agent).where(
                 Agent.creator_id == user_id,
-                Agent.is_expired == False,
+                not Agent.is_expired,
             )
         )
         current_count = count_result.scalar() or 0

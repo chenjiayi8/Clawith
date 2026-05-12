@@ -6,7 +6,9 @@
  */
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
+import { IconDownload, IconEdit, IconFolder, IconFolderPlus, IconUpload } from '@tabler/icons-react';
 import MarkdownRenderer from './MarkdownRenderer';
+import { useDropZone } from '../hooks/useDropZone';
 
 // ─── Types ─────────────────────────────────────────────
 
@@ -23,6 +25,8 @@ export interface FileBrowserApi {
     write: (path: string, content: string) => Promise<any>;
     delete: (path: string) => Promise<any>;
     upload?: (file: File, path: string, onProgress?: (pct: number) => void) => Promise<any>;
+    previewZip?: (file: File) => Promise<{ root_folder: string; files: string[]; total: number }>;
+    extractZip?: (file: File, targetPath: string, rootName: string) => Promise<{ extracted: number }>;
     downloadUrl?: (path: string) => string;
 }
 
@@ -36,6 +40,7 @@ export interface FileBrowserProps {
         edit?: boolean;
         delete?: boolean;
         directoryNavigation?: boolean;
+        zipImport?: boolean;
     };
     fileFilter?: string[];
     singleFile?: string;
@@ -57,6 +62,13 @@ function isTextFile(name: string): boolean {
     return !base.includes('.') || base.startsWith('.');
 }
 
+const IMAGE_EXTS = ['.png', '.jpg', '.jpeg', '.gif', '.svg', '.webp', '.bmp', '.ico'];
+
+function isImage(name: string): boolean {
+    const n = name.toLowerCase();
+    return IMAGE_EXTS.some(ext => n.endsWith(ext));
+}
+
 // ─── Component ─────────────────────────────────────────
 
 export default function FileBrowser({
@@ -65,7 +77,7 @@ export default function FileBrowser({
     features = {},
     fileFilter,
     singleFile,
-    uploadAccept = '.pdf,.docx,.xlsx,.pptx,.txt,.md,.csv,.json,.xml,.yaml,.yml,.js,.ts,.py,.html,.css,.sh,.log',
+    uploadAccept = '.pdf,.docx,.xlsx,.pptx,.txt,.md,.csv,.json,.xml,.yaml,.yml,.js,.ts,.py,.html,.css,.sh,.log,.png,.jpg,.jpeg,.gif,.svg,.webp,.bmp,.ico',
     title,
     readOnly = false,
     onRefresh,
@@ -79,6 +91,7 @@ export default function FileBrowser({
         edit = !readOnly,
         delete: canDelete = !readOnly,
         directoryNavigation = false,
+        zipImport = false,
     } = features;
 
     // ─── State ─────────────────────────────────────────
@@ -89,7 +102,7 @@ export default function FileBrowser({
     }, [onPathChange]);
 
     // Fire onPathChange on mount so parent starts in sync
-    useEffect(() => { onPathChange?.(rootPath); }, []);
+    useEffect(() => { onPathChange?.(rootPath); }, [rootPath, onPathChange]);
     const [files, setFiles] = useState<FileItem[]>([]);
     const [loading, setLoading] = useState(false);
     const [contentLoaded, setContentLoaded] = useState(false);
@@ -103,6 +116,11 @@ export default function FileBrowser({
     const [promptModal, setPromptModal] = useState<{ title: string; placeholder: string; action: string } | null>(null);
     const [promptValue, setPromptValue] = useState('');
     const [uploadProgress, setUploadProgress] = useState<{ fileName: string; percent: number } | null>(null);
+    const [showZipModal, setShowZipModal] = useState(false);
+    const [zipFile, setZipFile] = useState<File | null>(null);
+    const [zipPreview, setZipPreview] = useState<{ root_folder: string; files: string[]; total: number } | null>(null);
+    const [zipRootName, setZipRootName] = useState('');
+    const [zipUploading, setZipUploading] = useState(false);
     const textareaRef = useRef<HTMLTextAreaElement>(null);
 
     // Auto-resize textarea to match content height
@@ -147,6 +165,31 @@ export default function FileBrowser({
         }
         setLoading(false);
     }, [api, currentPath, singleFile, fileFilter]);
+
+    const handleDroppedFiles = useCallback(async (files: File[]) => {
+        if (!api.upload || files.length === 0) return;
+        try {
+            for (const file of files) {
+                setUploadProgress({ fileName: file.name, percent: 0 });
+                await api.upload(file, currentPath, (pct) => {
+                    setUploadProgress({ fileName: file.name, percent: pct });
+                });
+            }
+            setUploadProgress(null);
+            await reload();
+            onRefresh?.();
+            showToast(t('agent.upload.success', 'Upload successful'));
+        } catch (err: any) {
+            setUploadProgress(null);
+            showToast(t('agent.upload.failed', 'Upload failed') + ': ' + (err.message || ''), 'error');
+        }
+    }, [api, currentPath, reload, onRefresh, showToast, t]);
+
+    const { isDragging, dropZoneProps } = useDropZone({
+        onDrop: handleDroppedFiles,
+        disabled: !upload || !api.upload || !!singleFile || !!viewing || readOnly,
+        accept: uploadAccept,
+    });
 
     useEffect(() => { reload(); }, [reload]);
 
@@ -252,6 +295,51 @@ export default function FileBrowser({
         }
     };
 
+    const closeZipModal = useCallback(() => {
+        setShowZipModal(false);
+        setZipFile(null);
+        setZipPreview(null);
+        setZipRootName('');
+        setZipUploading(false);
+    }, []);
+
+    const zipTargetPath = useCallback(() => {
+        const normalizedRoot = rootPath.replace(/^\/+|\/+$/g, '');
+        const normalizedCurrent = currentPath.replace(/^\/+|\/+$/g, '');
+        if (!normalizedRoot) return normalizedCurrent;
+        if (normalizedCurrent === normalizedRoot) return '';
+        if (normalizedCurrent.startsWith(`${normalizedRoot}/`)) return normalizedCurrent.slice(normalizedRoot.length + 1);
+        return normalizedCurrent;
+    }, [currentPath, rootPath]);
+
+    const handleZipFileChange = useCallback(async (file?: File | null) => {
+        if (!file || !api.previewZip) return;
+        setZipFile(file);
+        try {
+            const preview = await api.previewZip(file);
+            setZipPreview(preview);
+            setZipRootName(preview.root_folder || '');
+        } catch (err: any) {
+            showToast(`Failed to preview zip: ${err?.message || err}`, 'error');
+        }
+    }, [api, showToast]);
+
+    const handleZipExtract = useCallback(async () => {
+        if (!zipFile || !api.extractZip) return;
+        setZipUploading(true);
+        try {
+            const result = await api.extractZip(zipFile, zipTargetPath(), zipRootName);
+            showToast(`Extracted ${result.extracted} files successfully`);
+            closeZipModal();
+            await reload();
+            onRefresh?.();
+        } catch (err: any) {
+            showToast(`Failed to extract: ${err?.message || err}`, 'error');
+        } finally {
+            setZipUploading(false);
+        }
+    }, [api, zipFile, zipRootName, zipTargetPath, closeZipModal, reload, onRefresh, showToast]);
+
     // ─── Breadcrumbs ──────────────────────────────────
 
     const pathParts = currentPath ? currentPath.split('/').filter(Boolean) : [];
@@ -264,7 +352,7 @@ export default function FileBrowser({
                     style={{ cursor: 'pointer', color: 'var(--accent-primary)', fontWeight: 500 }}
                     onClick={() => { setCurrentPath(rootPath); setViewing(null); setEditing(false); }}
                 >
-                    📁 {rootPath || 'root'}
+                    <IconFolder size={14} stroke={1.8} /> {rootPath || 'root'}
                 </span>
                 {pathParts.slice(rootPath ? rootPath.split('/').filter(Boolean).length : 0).map((part, i) => {
                     const upTo = pathParts.slice(0, (rootPath ? rootPath.split('/').filter(Boolean).length : 0) + i + 1).join('/');
@@ -345,6 +433,77 @@ export default function FileBrowser({
         );
     };
 
+    const renderZipModal = () => {
+        if (!showZipModal) return null;
+        return (
+            <div
+                style={{ position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, background: 'rgba(0,0,0,0.5)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 10000 }}
+                onClick={(e) => { if (e.target === e.currentTarget) closeZipModal(); }}
+            >
+                <div style={{ background: 'var(--bg-primary)', borderRadius: '12px', padding: '24px', maxWidth: '600px', width: '90%', border: '1px solid var(--border-subtle)', boxShadow: '0 20px 60px rgba(0,0,0,0.4)' }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px' }}>
+                        <h4 style={{ margin: 0, fontSize: '15px' }}>Import Skill Package</h4>
+                        <button onClick={closeZipModal} style={{ background: 'none', border: 'none', fontSize: '18px', cursor: 'pointer', color: 'var(--text-secondary)', padding: '4px 8px' }}>×</button>
+                    </div>
+
+                    {!zipPreview ? (
+                        <div>
+                            <p style={{ color: 'var(--text-secondary)', marginBottom: '16px', fontSize: '13px' }}>
+                                Select a .zip file containing skill definitions (.md files with YAML frontmatter).
+                            </p>
+                            <input
+                                type="file"
+                                accept=".zip"
+                                onChange={(e) => void handleZipFileChange(e.target.files?.[0])}
+                            />
+                        </div>
+                    ) : (
+                        <div>
+                            <p style={{ marginBottom: '8px', fontSize: '13px' }}>
+                                <strong>{zipPreview.total}</strong> files found in zip
+                            </p>
+
+                            <div style={{ marginBottom: '16px' }}>
+                                <label style={{ display: 'block', marginBottom: '4px', fontSize: '14px' }}>
+                                    Extract as folder:
+                                </label>
+                                <input
+                                    className="form-input"
+                                    type="text"
+                                    value={zipRootName}
+                                    onChange={e => setZipRootName(e.target.value)}
+                                    placeholder="(empty = extract contents directly)"
+                                    style={{ width: '100%', fontSize: '13px', boxSizing: 'border-box' }}
+                                />
+                                <p style={{ fontSize: '12px', color: 'var(--text-secondary)', marginTop: '4px' }}>
+                                    Will extract to: {currentPath || rootPath || 'root'}{zipRootName ? `/${zipRootName}` : ''}...
+                                </p>
+                            </div>
+
+                            <div style={{ maxHeight: '200px', overflowY: 'auto', fontSize: '12px', background: 'var(--bg-secondary)', padding: '8px', borderRadius: '4px', marginBottom: '16px' }}>
+                                {zipPreview.files.slice(0, 20).map((file, i) => (
+                                    <div key={i} style={{ padding: '2px 0', color: 'var(--text-secondary)' }}>{file}</div>
+                                ))}
+                                {zipPreview.total > 20 && (
+                                    <div style={{ padding: '2px 0', color: 'var(--text-secondary)', fontStyle: 'italic' }}>
+                                        ...and {zipPreview.total - 20} more files
+                                    </div>
+                                )}
+                            </div>
+
+                            <div style={{ display: 'flex', gap: '8px', justifyContent: 'flex-end' }}>
+                                <button className="btn btn-secondary" onClick={closeZipModal}>Cancel</button>
+                                <button className="btn btn-primary" disabled={zipUploading} onClick={() => void handleZipExtract()}>
+                                    {zipUploading ? 'Extracting...' : 'Extract'}
+                                </button>
+                            </div>
+                        </div>
+                    )}
+                </div>
+            </div>
+        );
+    };
+
     // ═══════════════════════════════════════════════════
     // SINGLE FILE MODE (Soul-style)
     // ═══════════════════════════════════════════════════
@@ -403,7 +562,7 @@ export default function FileBrowser({
                     {isText && edit && (
                         !editing ? (
                             <button className="btn btn-secondary" style={{ padding: '4px 12px', fontSize: '12px' }}
-                                onClick={() => { setEditContent(content); setEditing(true); }}>✏️ {t('agent.soul.editButton')}</button>
+                                onClick={() => { setEditContent(content); setEditing(true); }}><IconEdit size={13} stroke={1.8} /> {t('agent.soul.editButton')}</button>
                         ) : (
                             <div style={{ display: 'flex', gap: '6px' }}>
                                 <button className="btn btn-secondary" style={{ padding: '4px 12px', fontSize: '12px' }}
@@ -415,7 +574,7 @@ export default function FileBrowser({
                     )}
                     {api.downloadUrl && (
                         <a href={api.downloadUrl(viewing)} download style={{ textDecoration: 'none' }}>
-                            <button className="btn btn-secondary" style={{ padding: '4px 12px', fontSize: '12px' }}>⬇ {t('common.download', 'Download')}</button>
+                            <button className="btn btn-secondary" style={{ padding: '4px 12px', fontSize: '12px' }}><IconDownload size={13} stroke={1.8} /> {t('common.download', 'Download')}</button>
                         </a>
                     )}
                     {canDelete && (
@@ -435,6 +594,18 @@ export default function FileBrowser({
                                 {content || t('common.noData', 'No content yet')}
                             </pre>
                         )
+                    ) : isImage(viewing) ? (
+                        <div style={{ textAlign: 'center', padding: '20px', background: 'var(--bg-tertiary)', borderRadius: '8px' }}>
+                            {api.downloadUrl ? (
+                                <img
+                                    src={api.downloadUrl(viewing)}
+                                    alt={viewing.split('/').pop()}
+                                    style={{ maxWidth: '100%', maxHeight: '600px', objectFit: 'contain', borderRadius: '4px', boxShadow: '0 4px 12px rgba(0,0,0,0.1)' }}
+                                />
+                            ) : (
+                                <div style={{ padding: '20px', color: 'var(--text-tertiary)' }}>Cannot preview image without download URL</div>
+                            )}
+                        </div>
                     ) : (
                         <div style={{ textAlign: 'center', padding: '40px', color: 'var(--text-tertiary)' }}>
                             <div style={{ fontSize: '48px', marginBottom: '12px' }}>⌇</div>
@@ -442,7 +613,7 @@ export default function FileBrowser({
                             <div style={{ fontSize: '12px', marginBottom: '16px' }}>Binary file — cannot preview</div>
                             {api.downloadUrl && (
                                 <a href={api.downloadUrl(viewing)} download style={{ textDecoration: 'none' }}>
-                                    <button className="btn btn-primary" style={{ fontSize: '13px', padding: '8px 20px' }}>⬇ {t('common.download', 'Download')}</button>
+                                    <button className="btn btn-primary" style={{ fontSize: '13px', padding: '8px 20px' }}><IconDownload size={14} stroke={1.8} /> {t('common.download', 'Download')}</button>
                                 </a>
                             )}
                         </div>
@@ -458,19 +629,39 @@ export default function FileBrowser({
     // FILE LIST / BROWSER MODE
     // ═══════════════════════════════════════════════════
     return (
-        <div>
+        <div className="drop-zone-wrapper" {...dropZoneProps}>
+            {isDragging && (
+                <div className="drop-zone-overlay">
+                    <div className="drop-zone-overlay__icon"><IconUpload size={28} stroke={1.8} /></div>
+                    <div className="drop-zone-overlay__text">{t('agent.workspace.dragOrClick', 'Drop files to upload')}</div>
+                </div>
+            )}
             {/* Toolbar */}
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '10px', flexWrap: 'wrap', gap: '8px' }}>
                 {title && <h3 style={{ margin: 0 }}>{title}</h3>}
                 {renderBreadcrumbs()}
                 <div style={{ display: 'flex', gap: '6px', marginLeft: 'auto' }}>
                     {upload && api.upload && (
-                        <button className="btn btn-secondary" style={{ fontSize: '12px' }} onClick={handleUpload}>⬆ Upload</button>
+                        <button className="btn btn-secondary" style={{ fontSize: '12px' }} onClick={handleUpload}><IconUpload size={13} stroke={1.8} /> Upload</button>
+                    )}
+                    {zipImport && api.previewZip && api.extractZip && (
+                        <button
+                            className="btn btn-outline"
+                            style={{ fontSize: '12px' }}
+                            onClick={() => {
+                                setShowZipModal(true);
+                                setZipFile(null);
+                                setZipPreview(null);
+                                setZipRootName('');
+                            }}
+                        >
+                            Import Skill Package
+                        </button>
                     )}
                     {newFolder && (
                         <button className="btn btn-secondary" style={{ fontSize: '12px' }}
                             onClick={() => setPromptModal({ title: t('agent.workspace.newFolder'), placeholder: t('agent.workspace.newFolderName'), action: 'newFolder' })}>
-                            📁 {t('agent.workspace.newFolder')}
+                            <IconFolderPlus size={13} stroke={1.8} /> {t('agent.workspace.newFolder')}
                         </button>
                     )}
                     {newFile && !fileFilter && (
@@ -504,7 +695,9 @@ export default function FileBrowser({
                 </div>
             ) : files.length === 0 ? (
                 <div className="card" style={{ textAlign: 'center', padding: '40px', color: 'var(--text-tertiary)' }}>
-                    {t('common.noData')}
+                    {upload && api.upload
+                        ? t('agent.workspace.dragOrClick', 'Drop files here or click Upload')
+                        : t('common.noData')}
                 </div>
             ) : (
                 <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
@@ -544,8 +737,8 @@ export default function FileBrowser({
                                     <a href={api.downloadUrl(f.path || `${currentPath}/${f.name}`)} download
                                         onClick={(e) => e.stopPropagation()}
                                         title={t('common.download', 'Download')}
-                                        style={{ padding: '2px 6px', fontSize: '11px', color: 'var(--accent-primary)', textDecoration: 'none', borderRadius: '4px' }}>
-                                        ⬇
+                                        style={{ padding: '2px 6px', fontSize: '11px', color: 'var(--accent-primary)', textDecoration: 'none', borderRadius: '4px', display: 'inline-flex', alignItems: 'center' }}>
+                                        <IconDownload size={13} stroke={1.8} />
                                     </a>
                                 )}
                                 {canDelete && !f.is_dir && (
@@ -562,6 +755,7 @@ export default function FileBrowser({
 
             {renderDeleteModal()}
             {renderPromptModal()}
+            {renderZipModal()}
             {renderToast()}
         </div>
     );

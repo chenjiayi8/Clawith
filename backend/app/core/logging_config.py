@@ -3,14 +3,24 @@
 import sys
 import logging
 from contextvars import ContextVar
-from typing import Optional
 
-from loguru import logger
+from loguru import logger as loguru_logger
 
 # Context variable for trace ID
 from uuid import uuid4
 
 trace_id_var: ContextVar[str] = ContextVar("trace_id", default=None)
+
+
+NOISY_CONNECTION_LOGGERS = {
+    # WebSocket accepted / HTTP access lines from uvicorn.
+    "uvicorn.access": logging.WARNING,
+    # "connection open" / "connection closed" emitted by websockets.
+    "websockets": logging.WARNING,
+    "websockets.server": logging.WARNING,
+    "websockets.client": logging.WARNING,
+    "uvicorn.protocols.websockets.websockets_impl": logging.WARNING,
+}
 
 
 def get_trace_id() -> str:
@@ -26,20 +36,27 @@ def set_trace_id(trace_id: str) -> None:
 def configure_logging():
     """Configure loguru with custom format including trace ID."""
     # Remove default handler
-    logger.remove()
+    loguru_logger.remove()
 
     # Add stdout handler with custom format and filter to ensure trace_id exists
-    logger.add(
+    loguru_logger.add(
         sys.stdout,
         level="INFO",
-        format="<green>{time:YYYY-MM-DD HH:mm:ss}</green> | <level>{level: <8}</level> | <cyan>{extra[trace_id]:-<12}</cyan> | <cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> - <level>{message}</level>",
+        format="<green>{time:YYYY-MM-DD HH:mm:ss}</green> | <level>{level}</level> | <cyan>{extra[trace_id]:-<12}</cyan> | <cyan>{name}</cyan>:<cyan>{line}</cyan> - <level>{message}</level>",
         enqueue=True,
         backtrace=True,
         diagnose=True,
         filter=lambda record: (record["extra"].setdefault("trace_id", get_trace_id() or str(uuid4())) is not None)
     )
 
-    return logger
+    return loguru_logger
+
+
+def quiet_noisy_connection_loggers() -> None:
+    """Reduce chatty transport-level logs while keeping warnings/errors visible."""
+    for logger_name, level in NOISY_CONNECTION_LOGGERS.items():
+        target = logging.getLogger(logger_name)
+        target.setLevel(level)
 
 
 def intercept_standard_logging():
@@ -48,7 +65,7 @@ def intercept_standard_logging():
         def emit(self, record):
             # Get corresponding loguru level
             try:
-                level = logger.level(record.levelname).name
+                level = loguru_logger.level(record.levelname).name
             except ValueError:
                 level = record.levelno
 
@@ -58,8 +75,18 @@ def intercept_standard_logging():
                 frame = frame.f_back
                 depth += 1
 
-            logger.opt(depth=depth, exception=record.exc_info).log(
-                level, record.getMessage()
+            # Capture the message safely
+            try:
+                message = record.getMessage()
+            except (TypeError, ValueError):
+                # Fallback if formatting fails (e.g. third party lib bug)
+                if record.args:
+                    message = f"{record.msg} [args={record.args}]"
+                else:
+                    message = record.msg
+
+            loguru_logger.opt(depth=depth, exception=record.exc_info).log(
+                level, message
             )
 
     # Replace all standard logger handlers
@@ -67,6 +94,7 @@ def intercept_standard_logging():
     for name in logging.root.manager.loggerDict:
         logging.getLogger(name).handlers = [InterceptHandler()]
         logging.getLogger(name).propagate = False
+    quiet_noisy_connection_loggers()
 
 
 # Configure on import

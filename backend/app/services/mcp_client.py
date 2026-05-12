@@ -10,7 +10,6 @@ Reference: https://modelcontextprotocol.io/docs
 
 import httpx
 import json
-import asyncio
 from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
 
 from loguru import logger
@@ -282,15 +281,17 @@ class MCPClient:
         if self._transport == "streamable":
             return await self._streamable_request(method, params)
 
-        # Auto-detect: try Streamable HTTP first
-        streamable_err_msg = ""
+        # Auto-detect: try Streamable HTTP first. Python clears exception
+        # variables after an `except ... as name` block exits, so keep a stable
+        # string copy for the later SSE fallback error.
+        streamable_error_message = ""
         try:
             result = await self._streamable_request(method, params)
             self._transport = "streamable"
             return result
-        except Exception as e:
-            streamable_err_msg = str(e)
-            logger.info(f"[MCPClient] Streamable HTTP failed ({streamable_err_msg}), trying SSE transport...")
+        except Exception as streamable_err:
+            streamable_error_message = str(streamable_err)
+            logger.info(f"[MCPClient] Streamable HTTP failed ({streamable_err}), trying SSE transport...")
 
         # Fallback to SSE
         try:
@@ -300,7 +301,7 @@ class MCPClient:
         except Exception as sse_err:
             raise Exception(
                 f"Both transports failed. "
-                f"Streamable HTTP: {streamable_err_msg}; "
+                f"Streamable HTTP: {streamable_error_message}; "
                 f"SSE: {sse_err}"
             )
 

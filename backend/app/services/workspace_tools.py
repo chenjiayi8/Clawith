@@ -1,16 +1,20 @@
 """Workspace deployment tools for the Software Engineer agent."""
 
-import re
-import uuid
+import json
 import logging
+import re
+import shutil
+import uuid
 from pathlib import Path
 
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import or_, select
+from sqlalchemy.exc import IntegrityError
 
 from app.config import get_settings
 from app.database import async_session
+from app.models.agent import Agent as AgentModel
 from app.models.workspace import WorkspaceBugReport, WorkspaceProject
+from app.services.workspace_index import regenerate_index
 
 logger = logging.getLogger(__name__)
 
@@ -18,6 +22,22 @@ SLUG_PATTERN = re.compile(r"^[a-z0-9][a-z0-9-]{0,48}[a-z0-9]$")
 RESERVED_SLUGS = {"_index", "api", "static", "health"}
 
 settings = get_settings()
+
+
+async def _get_agent_tenant_id(agent_id: uuid.UUID) -> uuid.UUID | None:
+    """Resolve tenant ownership for an agent-driven workspace action."""
+    async with async_session() as db:
+        result = await db.execute(select(AgentModel.tenant_id).where(AgentModel.id == agent_id))
+        return result.scalar_one_or_none()
+
+
+def _scope_workspace_project_query(query, tenant_id: uuid.UUID | None, include_platform_global: bool):
+    """Apply tenant scope to workspace admin queries."""
+    if tenant_id is None:
+        return query
+    if include_platform_global:
+        return query.where(or_(WorkspaceProject.tenant_id == tenant_id, WorkspaceProject.tenant_id.is_(None)))
+    return query.where(WorkspaceProject.tenant_id == tenant_id)
 
 
 def validate_slug(slug: str) -> str | None:
@@ -45,21 +65,36 @@ async def check_slug_available(slug: str) -> str | None:
             return f"Slug '{slug}' is already in use."
     return None
 
-
-import asyncio
-import html as html_mod
-import json
-import shutil
-
-from sqlalchemy.exc import IntegrityError
-
-from app.services.workspace_index import regenerate_index
-
-
 def _get_docker_client():
     """Get a Docker client connected via the mounted socket. Lazy import to avoid import-time failure."""
     import docker
     return docker.DockerClient(base_url="unix:///var/run/docker.sock")
+
+
+def _resolve_project_dockerfile(agent_ws: Path, slug: str, project: WorkspaceProject) -> Path:
+    """Resolve the Dockerfile for a pending workspace deployment.
+
+    Priority:
+    1. Stored project.dockerfile_path (deterministic)
+    2. Backward-compatible fallback: exactly one Dockerfile under workspace/{slug}/
+    """
+    dockerfile_rel = (project.dockerfile_path or "").strip()
+    if dockerfile_rel:
+        candidate = (agent_ws / dockerfile_rel).resolve()
+        if not str(candidate).startswith(str(agent_ws.resolve())):
+            raise ValueError("Stored dockerfile_path escapes the agent workspace.")
+        if not candidate.exists() or not candidate.is_file():
+            raise FileNotFoundError("Stored dockerfile_path does not exist.")
+        return candidate
+
+    slug_candidates = list(agent_ws.glob(f"workspace/{slug}/**/Dockerfile"))
+    if len(slug_candidates) == 1:
+        return slug_candidates[0]
+    if len(slug_candidates) > 1:
+        raise ValueError(
+            f"Multiple Dockerfiles found for project '{slug}'. Please resubmit with an explicit dockerfile_path."
+        )
+    raise FileNotFoundError("No Dockerfile found for the pending deployment request.")
 
 
 async def tool_request_build(
@@ -81,12 +116,15 @@ async def tool_request_build(
     if avail_error:
         return f"Error: {avail_error}"
 
+    tenant_id = await _get_agent_tenant_id(agent_id)
+
     try:
         async with async_session() as db:
             project = WorkspaceProject(
                 slug=slug,
                 name=name,
                 description=description,
+                tenant_id=tenant_id,
                 requested_by=agent_id,
                 status="requested",
             )
@@ -179,6 +217,8 @@ async def tool_deploy_static(
     if slug_error:
         return f"Error: {slug_error}"
 
+    tenant_id = await _get_agent_tenant_id(agent_id)
+
     # Resolve source path within agent workspace
     source_path = (ws / source_dir).resolve()
     if not str(source_path).startswith(str(ws.resolve())):
@@ -204,6 +244,7 @@ async def tool_deploy_static(
                 slug=slug,
                 name=slug.replace("-", " ").title(),
                 description="Deployed via deploy_static",
+                tenant_id=tenant_id,
                 built_by=agent_id,
                 deploy_type="static",
                 status="building",
@@ -211,6 +252,7 @@ async def tool_deploy_static(
             db.add(project)
             await db.flush()
         else:
+            project.tenant_id = tenant_id
             project.deploy_type = "static"
             project.built_by = agent_id
             project.status = "building"
@@ -275,6 +317,8 @@ async def tool_request_container_deploy(
     if slug_error:
         return f"Error: {slug_error}"
 
+    tenant_id = await _get_agent_tenant_id(agent_id)
+
     # Verify Dockerfile exists
     dockerfile_full = (ws / dockerfile_path).resolve()
     if not str(dockerfile_full).startswith(str(ws.resolve())):
@@ -299,20 +343,24 @@ async def tool_request_container_deploy(
                 slug=slug,
                 name=name,
                 description=description,
+                tenant_id=tenant_id,
                 built_by=agent_id,
                 deploy_type="container",
                 status="awaiting_approval",
                 container_port=port,
+                dockerfile_path=dockerfile_path,
                 resource_limits=resource_suggestion if resource_suggestion else None,
             )
             db.add(project)
         else:
             project.name = name
             project.description = description
+            project.tenant_id = tenant_id
             project.built_by = agent_id
             project.deploy_type = "container"
             project.status = "awaiting_approval"
             project.container_port = port
+            project.dockerfile_path = dockerfile_path
             project.resource_limits = resource_suggestion if resource_suggestion else None
 
         await db.commit()
@@ -490,12 +538,18 @@ async def tool_report_workspace_bug(
     return f"Bug report created for project '{slug}'. The Software Engineer agent will investigate."
 
 
-async def approve_container_deploy(slug: str, resource_limits: dict | None = None) -> dict:
+async def approve_container_deploy(
+    slug: str,
+    resource_limits: dict | None = None,
+    *,
+    tenant_id: uuid.UUID | None = None,
+    include_platform_global: bool = False,
+) -> dict:
     """Approve and execute a container deployment. Returns status dict."""
     async with async_session() as db:
-        result = await db.execute(
-            select(WorkspaceProject).where(WorkspaceProject.slug == slug)
-        )
+        query = select(WorkspaceProject).where(WorkspaceProject.slug == slug)
+        query = _scope_workspace_project_query(query, tenant_id, include_platform_global)
+        result = await db.execute(query)
         project = result.scalar_one_or_none()
         if not project:
             return {"ok": False, "error": f"Project '{slug}' not found."}
@@ -512,25 +566,18 @@ async def approve_container_deploy(slug: str, resource_limits: dict | None = Non
         limits = project.resource_limits or {}
         await db.commit()
 
-    # Find the Dockerfile in the agent's workspace
+    # Resolve the requested Dockerfile deterministically from the stored path.
     agent_ws = Path(settings.AGENT_DATA_DIR) / str(agent_id)
-    # Search for Dockerfile in workspace subdirectories
-    dockerfile_candidates = list(agent_ws.glob(f"workspace/{slug}/**/Dockerfile")) + \
-                           list(agent_ws.glob(f"workspace/**/Dockerfile"))
-    if not dockerfile_candidates:
-        # Also check for any Dockerfile in the workspace
-        dockerfile_candidates = list(agent_ws.glob("workspace/**/Dockerfile"))
-
-    if not dockerfile_candidates:
+    try:
+        dockerfile_path = _resolve_project_dockerfile(agent_ws, slug, project)
+    except (FileNotFoundError, ValueError) as exc:
         async with async_session() as db:
             proj = await db.get(WorkspaceProject, (await db.execute(
                 select(WorkspaceProject.id).where(WorkspaceProject.slug == slug)
             )).scalar_one())
             proj.status = "failed"
             await db.commit()
-        return {"ok": False, "error": "No Dockerfile found in agent workspace."}
-
-    dockerfile_path = dockerfile_candidates[0]
+        return {"ok": False, "error": str(exc)}
     build_context = dockerfile_path.parent
 
     # Build and start container
@@ -632,12 +679,17 @@ async def approve_container_deploy(slug: str, resource_limits: dict | None = Non
     }
 
 
-async def reject_container_deploy(slug: str) -> dict:
+async def reject_container_deploy(
+    slug: str,
+    *,
+    tenant_id: uuid.UUID | None = None,
+    include_platform_global: bool = False,
+) -> dict:
     """Reject a container deployment request."""
     async with async_session() as db:
-        result = await db.execute(
-            select(WorkspaceProject).where(WorkspaceProject.slug == slug)
-        )
+        query = select(WorkspaceProject).where(WorkspaceProject.slug == slug)
+        query = _scope_workspace_project_query(query, tenant_id, include_platform_global)
+        result = await db.execute(query)
         project = result.scalar_one_or_none()
         if not project:
             return {"ok": False, "error": f"Project '{slug}' not found."}

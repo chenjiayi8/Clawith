@@ -1,8 +1,6 @@
 """Feishu WebSocket Long Connection Manager."""
 
 import asyncio
-import json
-import threading
 from typing import Any, Dict
 import uuid
 
@@ -15,6 +13,65 @@ except ImportError:
     lark = None  # type: ignore
     ws = None    # type: ignore
     _HAS_LARK = False
+
+if _HAS_LARK:
+    try:
+        import websockets as _websockets
+        # Keep a reference to the original connect so we can restore it if needed.
+        _orig_websockets_connect = _websockets.connect
+        _PROXY_PATCH_AVAILABLE = True
+    except ImportError:
+        _PROXY_PATCH_AVAILABLE = False
+else:
+    _PROXY_PATCH_AVAILABLE = False
+
+
+def _make_no_proxy_connect(orig_connect):
+    """Return a drop-in replacement for websockets.connect that forces proxy=None.
+
+    This is intentionally NOT applied at module import time to avoid polluting
+    the global websockets namespace for other modules in the process.  Instead
+    it is applied as a scoped context manager around lark-oapi's _connect() call.
+    """
+    import contextlib
+
+    class _NoProxyConnect:
+        """Wraps websockets.connect to inject proxy=None, preventing macOS
+        system-proxy interference with long-lived SSE / WebSocket connections."""
+
+        def __init__(self, *args, **kwargs):
+            kwargs.setdefault("proxy", None)
+            self._coro = orig_connect(*args, **kwargs)
+            self._ws = None
+
+        def __await__(self):
+            return self._coro.__await__()
+
+        async def __aenter__(self):
+            self._ws = await self._coro
+            return self._ws
+
+        async def __aexit__(self, *exc):
+            if self._ws:
+                await self._ws.close()
+
+    @contextlib.asynccontextmanager
+    async def _scoped_no_proxy():
+        """Context manager that temporarily replaces websockets.connect for
+        the duration of the lark-oapi connection handshake only."""
+        if not _PROXY_PATCH_AVAILABLE:
+            yield
+            return
+        old = _websockets.connect
+        _websockets.connect = _NoProxyConnect
+        logger.debug("[Feishu WS] Scoped websockets proxy bypass: active")
+        try:
+            yield
+        finally:
+            _websockets.connect = old
+            logger.debug("[Feishu WS] Scoped websockets proxy bypass: restored")
+
+    return _scoped_no_proxy
 
 from app.database import async_session
 from app.models.channel_config import ChannelConfig
@@ -45,6 +102,7 @@ class FeishuWSManager:
             try:
                 # The data object carries the raw event body
                 raw_body = getattr(data, "raw_body", None)
+                logger.info(f"[Feishu WS] Received event: {data}")
                 if not raw_body:
                     # Some SDK versions pass the dict directly
                     if isinstance(data, dict):
@@ -89,7 +147,7 @@ class FeishuWSManager:
                     main_loop = [t for t in asyncio.all_tasks() if t.get_name() != "feishu-ws"][0].get_loop()
                     asyncio.run_coroutine_threadsafe(self._async_handle_message(agent_id, data), main_loop)
                 except Exception as e:
-                    logger.error(f"[Feishu WS] Could not dispatch event to main loop: {e}", exc_info=True)
+                    logger.exception(f"[Feishu WS] Could not dispatch event to main loop: {e}")
 
         dispatcher = (
             lark.EventDispatcherHandler.builder("", "")
@@ -147,9 +205,7 @@ class FeishuWSManager:
                 await process_feishu_event(agent_id, body_dict, db)
 
         except Exception as e:
-            logger.error(
-                f"[Feishu WS] Error processing event for {agent_id}: {e}", exc_info=True
-            )
+            logger.exception(f"[Feishu WS] Error processing event for {agent_id}: {e}")
 
     async def start_client(
         self,
@@ -178,36 +234,101 @@ class FeishuWSManager:
         try:
             event_handler = self._create_event_handler(agent_id)
         except Exception as e:
-            logger.error(f"[Feishu WS] Failed to create event handler for {agent_id}: {e}", exc_info=True)
+            logger.exception(f"[Feishu WS] Failed to create event handler for {agent_id}: {e}")
             return
 
-        # Instantiate Client
+        # Instantiate Client — SDK manages connect + receive + ping internally.
+        # We set auto_reconnect=True so the SDK handles reconnections.
         client = ws.Client(
             app_id,
             app_secret,
             event_handler=event_handler,
             log_level=lark.LogLevel.INFO,
+            auto_reconnect=True,
         )
         self._clients[agent_id] = client
 
-        # Direct Async runner bypassing the faulty client.start()
+        # Build scoped proxy bypass: active only during _connect() to avoid
+        # permanently replacing websockets.connect for the whole process.
+        _no_proxy_ctx = (
+            _make_no_proxy_connect(_orig_websockets_connect)
+            if _PROXY_PATCH_AVAILABLE
+            else None
+        )
+
+        async def _do_full_connect():
+            """Perform a single clean connect + start receive/ping loops.
+            
+            This is the ONLY place we call _connect() and _ping_loop().
+            The SDK's internal _reconnect() will handle subsequent reconnections.
+            """
+            if _no_proxy_ctx:
+                async with _no_proxy_ctx():
+                    await client._connect()
+            else:
+                await client._connect()
+            asyncio.create_task(client._ping_loop())
+
         async def _run_async_client():
             try:
-                # Internally _connect() opens socket and drops _receive_message_loop() onto the global loop
-                await client._connect()
-                # Start ping loop natively
-                ping_task = asyncio.create_task(client._ping_loop())
-                
-                # Keep this task alive so it doesn't get canceled, and handle reconnections
-                while True:
-                    await asyncio.sleep(3600)  # Keep-alive
+                logger.info(f"[Feishu WS] Connecting for agent {agent_id}")
+                await _do_full_connect()
+                logger.info(f"[Feishu WS] Connected for agent {agent_id}, receive loop started")
             except asyncio.CancelledError:
-                logger.info(f"[Feishu WS] Async client task cancelled for {agent_id}")
-                await client._disconnect()
+                return
             except Exception as e:
-                logger.error(f"[Feishu WS] Async client exception for {agent_id}: {e}", exc_info=True)
-                await client._disconnect()
-                self._clients.pop(agent_id, None)
+                logger.exception(f"[Feishu WS] Initial connect failed for agent {agent_id}: {e}")
+
+            # Health-watch: only log status changes for diagnostics.
+            # SDK handles reconnect internally via _receive_message_loop → _reconnect.
+            # We do NOT call _connect() or _ping_loop() again to avoid creating
+            # duplicate connections that cause "kicked by new connection".
+            _last_conn_id = getattr(client, "_conn_id", None)
+            _was_disconnected = False
+            while True:
+                try:
+                    await asyncio.sleep(30)  # Check every 30 seconds
+
+                    conn = client._conn
+                    curr_conn_id = getattr(client, "_conn_id", None)
+
+                    if conn is None:
+                        if not _was_disconnected:
+                            logger.warning(
+                                f"[Feishu WS] Connection lost for agent {agent_id} "
+                                f"(last conn_id={_last_conn_id}), "
+                                "waiting for SDK auto-reconnect..."
+                            )
+                            _was_disconnected = True
+                    elif hasattr(conn, 'closed') and conn.closed:
+                        if not _was_disconnected:
+                            logger.warning(
+                                f"[Feishu WS] WebSocket closed for agent {agent_id}, "
+                                "waiting for SDK auto-reconnect..."
+                            )
+                            _was_disconnected = True
+                    else:
+                        if _was_disconnected:
+                            logger.info(
+                                f"[Feishu WS] Connection restored for agent {agent_id} "
+                                f"(new conn_id={curr_conn_id})"
+                            )
+                            _was_disconnected = False
+                        if curr_conn_id != _last_conn_id and curr_conn_id:
+                            logger.info(
+                                f"[Feishu WS] Connection ID changed for agent {agent_id}: "
+                                f"{_last_conn_id} → {curr_conn_id}"
+                            )
+                            _last_conn_id = curr_conn_id
+                except asyncio.CancelledError:
+                    logger.info(f"[Feishu WS] Task cancelled for agent {agent_id}")
+                    try:
+                        await client._disconnect()
+                    except Exception:
+                        pass
+                    return
+                except Exception as e:
+                    logger.exception(f"[Feishu WS] Health-watch error for agent {agent_id}: {e}")
 
         task = asyncio.create_task(_run_async_client(), name=f"feishu-ws-async-{str(agent_id)[:8]}")
         self._tasks[agent_id] = task
@@ -236,7 +357,7 @@ class FeishuWSManager:
         async with async_session() as db:
             result = await db.execute(
                 select(ChannelConfig).where(
-                    ChannelConfig.is_configured == True,
+                    ChannelConfig.is_configured,
                     ChannelConfig.channel_type == "feishu",
                 )
             )

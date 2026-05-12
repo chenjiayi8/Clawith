@@ -5,24 +5,40 @@ Provides Config CRUD and webhook-based message handling with AES encryption.
 
 import base64
 import hashlib
+import os
 import re
-import socket
 import struct
 import time
 import uuid
 import xml.etree.ElementTree as ET
+from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
+import asyncio
+import httpx
+from Crypto.Cipher import AES
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from fastapi.responses import HTMLResponse
 from loguru import logger
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.permissions import check_agent_access, is_agent_creator
-from app.core.security import get_current_user
-from app.database import get_db
+from app.core.security import create_access_token, get_current_user
+from app.database import async_session, get_db
+from app.models.agent import Agent as AgentModel
+from app.models.agent import DEFAULT_CONTEXT_WINDOW_SIZE
+from app.models.audit import ChatMessage
 from app.models.channel_config import ChannelConfig
+from app.models.identity import IdentityProvider, SSOScanSession
 from app.models.user import User
+from app.services.activity_logger import log_activity
+from app.services.auth_registry import auth_provider_registry
+from app.services.channel_session import find_or_create_channel_session
+from app.services.channel_user_service import channel_user_service
+from app.services.platform_service import platform_service
+from app.api.feishu import _call_agent_llm
 from app.schemas.schemas import ChannelConfigOut
+from app.services.wecom_stream import wecom_stream_manager
 
 router = APIRouter(tags=["wecom"])
 
@@ -47,7 +63,6 @@ def _decrypt_msg(encrypt_key: str, encrypted_text: str) -> tuple[str, str]:
 
     Returns (decrypted_xml, corp_id)
     """
-    from Crypto.Cipher import AES
     aes_key = base64.b64decode(encrypt_key + "=")
     iv = aes_key[:16]
     cipher = AES.new(aes_key, AES.MODE_CBC, iv)
@@ -61,8 +76,6 @@ def _decrypt_msg(encrypt_key: str, encrypted_text: str) -> tuple[str, str]:
 
 def _encrypt_msg(encrypt_key: str, reply_msg: str, corp_id: str) -> str:
     """Encrypt a reply message for WeCom."""
-    from Crypto.Cipher import AES
-    import os
     aes_key = base64.b64decode(encrypt_key + "=")
     iv = aes_key[:16]
     msg_bytes = reply_msg.encode("utf-8")
@@ -76,6 +89,64 @@ def _verify_signature(token: str, timestamp: str, nonce: str, encrypt: str) -> s
     """Generate WeCom message signature."""
     items = sorted([token, timestamp, nonce, encrypt])
     return hashlib.sha1("".join(items).encode("utf-8")).hexdigest()
+
+
+# ─── WeCom Domain Verification File Hosting ────────────
+
+# WeCom requires that each self-built app's trusted domain host a
+# verification file at: https://domain/WW_verify_<token>.txt
+# The file content is just the token string (plain text).
+#
+# For multi-tenant SaaS, we don't want every tenant to have their own server.
+# Instead, tenants paste their verification token into the enterprise settings,
+# and this endpoint serves the correct file content for any known token.
+#
+# Nginx config required to route requests at the root path:
+#   location ~ ^/(WW_verify_[A-Za-z0-9_.-]{1,64}\.txt)$ {
+#       proxy_pass http://backend:8000/api/wecom-verify/$1;
+#   }
+
+_VERIFY_FILENAME_RE = re.compile(r"^WW_verify_[A-Za-z0-9_]{1,64}\.txt$")
+
+
+@router.get("/wecom-verify/{filename}")
+async def serve_wecom_verify_file(
+    filename: str,
+    db: AsyncSession = Depends(get_db),
+):
+    """Serve a WeCom domain verification file.
+
+    Looks across all active WeCom IdentityProviders for one whose config
+    contains the requested filename. Returns the verification content as
+    plain text so WeCom's ownership-check bot can confirm it.
+
+    Security: filename is validated against a strict whitelist regex before
+    any DB lookup to prevent path traversal or injection attacks.
+    """
+    # Strict allowlist: only WW_verify_*.txt filenames are legal
+    if not _VERIFY_FILENAME_RE.fullmatch(filename):
+        return Response(status_code=404)
+
+    # Search all active WeCom providers for a matching verification entry
+    result = await db.execute(
+        select(IdentityProvider).where(
+            IdentityProvider.provider_type == "wecom",
+            IdentityProvider.is_active,
+        )
+    )
+    providers = result.scalars().all()
+
+    for provider in providers:
+        config = provider.config or {}
+        verify_files: dict = config.get("wecom_verify_files", {})
+        if filename in verify_files:
+            content = verify_files[filename]
+            logger.info(
+                f"[WeCom Verify] Serving {filename} for tenant {provider.tenant_id}"
+            )
+            return Response(content=content, media_type="text/plain")
+
+    return Response(status_code=404)
 
 
 # ─── Config CRUD ────────────────────────────────────────
@@ -138,6 +209,7 @@ async def configure_wecom_channel(
         existing.verification_token = token
         existing.extra_config = extra_config
         existing.is_configured = True
+        existing.is_connected = False
         await db.flush()
         config_out = ChannelConfigOut.model_validate(existing)
     else:
@@ -150,22 +222,23 @@ async def configure_wecom_channel(
             verification_token=token,
             extra_config=extra_config,
             is_configured=True,
+            is_connected=False,
         )
         db.add(config)
         await db.flush()
         config_out = ChannelConfigOut.model_validate(config)
 
-    # Auto-start WebSocket client if bot credentials provided
-    if has_ws_mode:
-        try:
-            from app.services.wecom_stream import wecom_stream_manager
-            import asyncio
+    try:
+        if has_ws_mode:
             asyncio.create_task(
                 wecom_stream_manager.start_client(agent_id, bot_id, bot_secret)
             )
             logger.info(f"[WeCom] WebSocket client start triggered for agent {agent_id}")
-        except Exception as e:
-            logger.error(f"[WeCom] Failed to start WebSocket client: {e}")
+        else:
+            asyncio.create_task(wecom_stream_manager.stop_client(agent_id))
+            logger.info(f"[WeCom] WebSocket client stop triggered for agent {agent_id}")
+    except Exception as e:
+        logger.error(f"[WeCom] Failed to update WebSocket client state: {e}")
 
     return config_out
 
@@ -186,7 +259,15 @@ async def get_wecom_channel(
     config = result.scalar_one_or_none()
     if not config:
         raise HTTPException(status_code=404, detail="WeCom not configured")
-    return ChannelConfigOut.model_validate(config)
+
+    from app.services.wecom_stream import wecom_stream_manager as runtime_wecom_stream_manager
+
+    config_out = ChannelConfigOut.model_validate(config)
+    if (config.extra_config or {}).get("connection_mode") == "websocket":
+        config_out.is_connected = runtime_wecom_stream_manager.status().get(str(agent_id), False)
+    else:
+        config_out.is_connected = False
+    return config_out
 
 
 @router.get("/agents/{agent_id}/wecom-channel/webhook-url")
@@ -195,17 +276,7 @@ async def get_wecom_webhook_url(
     request: Request,
     db: AsyncSession = Depends(get_db),
 ):
-    import os
-    from app.models.system_settings import SystemSetting
-    public_base = ""
-    result = await db.execute(select(SystemSetting).where(SystemSetting.key == "platform"))
-    setting = result.scalar_one_or_none()
-    if setting and setting.value.get("public_base_url"):
-        public_base = setting.value["public_base_url"].rstrip("/")
-    if not public_base:
-        public_base = os.environ.get("PUBLIC_BASE_URL", "").rstrip("/")
-    if not public_base:
-        public_base = str(request.base_url).rstrip("/")
+    public_base = await platform_service.get_public_base_url(db, request)
     return {"webhook_url": f"{public_base}/api/channel/wecom/{agent_id}/webhook"}
 
 
@@ -227,6 +298,9 @@ async def delete_wecom_channel(
     config = result.scalar_one_or_none()
     if not config:
         raise HTTPException(status_code=404, detail="WeCom not configured")
+    from app.services.wecom_stream import wecom_stream_manager as runtime_wecom_stream_manager
+
+    await runtime_wecom_stream_manager.stop_client(agent_id)
     await db.delete(config)
 
 
@@ -300,8 +374,6 @@ async def wecom_event_webhook(
 
     token = config.verification_token or ""
     encoding_aes_key = config.encrypt_key or ""
-    corp_id = config.app_id or ""
-
     # Parse encrypted XML body
     try:
         root = ET.fromstring(body_bytes)
@@ -337,6 +409,8 @@ async def wecom_event_webhook(
     msg_id = msg_root.findtext("MsgId", "")
     open_kfid = msg_root.findtext("OpenKfId", "")
     token = msg_root.findtext("Token", "")
+    # Group chat ID — present when message comes from a WeCom group
+    chat_id = msg_root.findtext("ChatId", "")
 
     # Dedup
     dedup_key = msg_id if msg_id else token
@@ -347,7 +421,7 @@ async def wecom_event_webhook(
         if len(_processed_wecom_events) > 1000:
             _processed_wecom_events.clear()
 
-    logger.info(f"[WeCom] Message type={msg_type}, from={from_user}, msg_id={msg_id}")
+    logger.info(f"[WeCom] Message type={msg_type}, from={from_user}, msg_id={msg_id}, chat_id={chat_id or 'N/A'}")
 
     if msg_type == "text":
         user_text = msg_root.findtext("Content", "").strip()
@@ -355,15 +429,13 @@ async def wecom_event_webhook(
             return Response(content="success", media_type="text/plain")
 
         # Process in background task
-        import asyncio
         asyncio.create_task(
-            _process_wecom_text(db, agent_id, config, from_user, user_text)
+            _process_wecom_text(db, agent_id, config, from_user, user_text, chat_id=chat_id)
         )
 
     elif msg_type == "event":
         event = msg_root.findtext("Event", "")
         if event == "kf_msg_or_event":
-            import asyncio
             asyncio.create_task(
                 _process_wecom_kf_event(agent_id, config, token, open_kfid)
             )
@@ -379,15 +451,11 @@ async def wecom_event_webhook(
 
 async def _process_wecom_kf_event(agent_id: uuid.UUID, config_obj: ChannelConfig, token: str, open_kfid: str = None):
     """Sync WeCom Customer Service (KF) messages in background."""
-    import httpx
-    import time
-    from app.database import async_session
-    from sqlalchemy import select as _select
-    from app.models.channel_config import ChannelConfig as ChannelConfigModel
-    
     try:
         async with async_session() as session:
-            r = await session.execute(_select(ChannelConfigModel).where(ChannelConfigModel.agent_id == agent_id, ChannelConfigModel.channel_type == "wecom"))
+            r = await session.execute(
+                select(ChannelConfig).where(ChannelConfig.agent_id == agent_id, ChannelConfig.channel_type == "wecom")
+            )
             config = r.scalar_one_or_none()
             if not config:
                 return
@@ -455,85 +523,58 @@ async def _process_wecom_text(
     is_kf: bool = False,
     open_kfid: str = None,
     kf_msg_id: str = None,
+    chat_id: str = "",
 ):
     """Process an incoming WeCom text message and reply."""
-    import json
-    import httpx
-    from datetime import datetime, timezone
-    from sqlalchemy import select as _select
-    from app.database import async_session
-    from app.models.agent import Agent as AgentModel
-    from app.models.audit import ChatMessage
-    from app.models.user import User as UserModel
-    from app.core.security import hash_password
-    from app.services.channel_session import find_or_create_channel_session
-    from app.api.feishu import _call_agent_llm
 
     async with async_session() as db:
         # Load agent
-        agent_r = await db.execute(_select(AgentModel).where(AgentModel.id == agent_id))
+        agent_r = await db.execute(select(AgentModel).where(AgentModel.id == agent_id))
         agent_obj = agent_r.scalar_one_or_none()
         if not agent_obj:
             logger.warning(f"[WeCom] Agent {agent_id} not found")
             return
         creator_id = agent_obj.creator_id
-        ctx_size = agent_obj.context_window_size if agent_obj else 20
+        ctx_size = (agent_obj.context_window_size or DEFAULT_CONTEXT_WINDOW_SIZE) if agent_obj else DEFAULT_CONTEXT_WINDOW_SIZE
 
-        conv_id = f"wecom_p2p_{from_user}"
+        # Distinguish group chat from P2P by chat_id presence
+        _is_group = bool(chat_id)
+        if _is_group:
+            conv_id = f"wecom_group_{chat_id}"
+        else:
+            conv_id = f"wecom_p2p_{from_user}"
 
-        # Find or create platform user
-        wc_username = f"wecom_{from_user}"
-        u_r = await db.execute(_select(UserModel).where(UserModel.username == wc_username))
-        platform_user = u_r.scalar_one_or_none()
+        # The channel_user_service resolves display names from OrgMember records
+        # (populated by org-sync or enriched on first SSO login). No need to
+        # make an extra API call here — it fails with 48009 when IP is not whitelisted.
+        extra_info = {"unionid": from_user}
 
-        # Try to resolve display name from WeCom API
-        display_name = f"WeCom {from_user[:8]}"
-        try:
-            async with httpx.AsyncClient(timeout=5) as client:
-                tok_resp = await client.get(
-                    "https://qyapi.weixin.qq.com/cgi-bin/gettoken",
-                    params={"corpid": config.app_id, "corpsecret": config.app_secret},
-                )
-                access_token = tok_resp.json().get("access_token", "")
-                if access_token:
-                    user_resp = await client.get(
-                        "https://qyapi.weixin.qq.com/cgi-bin/user/get",
-                        params={"access_token": access_token, "userid": from_user},
-                    )
-                    user_data = user_resp.json()
-                    if user_data.get("errcode") == 0:
-                        display_name = user_data.get("name", display_name)
-        except Exception as e:
-            logger.error(f"[WeCom] Failed to resolve user info: {e}")
-
-        if not platform_user:
-            import uuid as _uuid
-            platform_user = UserModel(
-                username=wc_username,
-                email=f"{wc_username}@wecom.local",
-                password_hash=hash_password(_uuid.uuid4().hex),
-                display_name=display_name,
-                role="member",
-                tenant_id=agent_obj.tenant_id if agent_obj else None,
-            )
-            db.add(platform_user)
-            await db.flush()
+        # Resolve channel user via unified service (uses OrgMember + SSO patterns)
+        platform_user = await channel_user_service.resolve_channel_user(
+            db=db,
+            agent=agent_obj,
+            channel_type="wecom",
+            external_user_id=from_user,
+            extra_info=extra_info,
+        )
         platform_user_id = platform_user.id
 
         # Find or create session
         sess = await find_or_create_channel_session(
             db=db,
             agent_id=agent_id,
-            user_id=platform_user_id,
+            user_id=creator_id if _is_group else platform_user_id,
             external_conv_id=conv_id,
             source_channel="wecom",
             first_message_title=user_text,
+            is_group=_is_group,
+            group_name=f"WeCom Group {chat_id[:8]}" if _is_group else None,
         )
         session_conv_id = str(sess.id)
 
         # Load history
         history_r = await db.execute(
-            _select(ChatMessage)
+            select(ChatMessage)
             .where(ChatMessage.agent_id == agent_id, ChatMessage.conversation_id == session_conv_id)
             .order_by(ChatMessage.created_at.desc())
             .limit(ctx_size)
@@ -602,9 +643,102 @@ async def _process_wecom_text(
         await db.commit()
 
         # Log activity
-        from app.services.activity_logger import log_activity
         await log_activity(
             agent_id, "chat_reply",
             f"Replied to WeCom message: {reply_text[:80]}",
             detail={"channel": "wecom", "user_text": user_text[:200], "reply": reply_text[:500]},
         )
+
+
+# ─── OAuth Callback (SSO) ──────────────────────────────
+
+@router.get("/auth/wecom/callback")
+async def wecom_callback(
+    code: str,
+    state: str = None,
+    db: AsyncSession = Depends(get_db),
+):
+    # 1. Resolve session to get tenant context
+    tenant_id = None
+    if state:
+        try:
+            sid = uuid.UUID(state)
+            s_res = await db.execute(select(SSOScanSession).where(SSOScanSession.id == sid))
+            session = s_res.scalar_one_or_none()
+            if session:
+                tenant_id = session.tenant_id
+        except (ValueError, AttributeError):
+            pass
+
+    # 1. Get WeCom provider config
+    provider_query = select(IdentityProvider).where(IdentityProvider.provider_type == "wecom")
+    if tenant_id:
+        # Strict scope
+        provider_query = provider_query.where(IdentityProvider.tenant_id == tenant_id)
+    else:
+        # Fallback to unscoped
+        provider_query = provider_query.where(IdentityProvider.tenant_id.is_(None))
+
+    provider_result = await db.execute(provider_query)
+    provider = provider_result.scalar_one_or_none()
+    if not provider:
+        raise HTTPException(status_code=404, detail="WeCom provider not configured for this tenant")
+
+    config = provider.config
+    config.get("app_id") or config.get("corp_id")
+    config.get("app_secret") or config.get("secret")
+
+    # 2. Extract user info and login/register via RegistrationService
+    try:
+        auth_provider = await auth_provider_registry.get_provider(
+            db,
+            "wecom",
+            str(tenant_id) if tenant_id else (str(provider.tenant_id) if provider.tenant_id else None),
+        )
+        if not auth_provider:
+            return HTMLResponse("Auth failed: WeCom provider unavailable")
+        
+        token_data = await auth_provider.exchange_code_for_token(code)
+        access_token_str = token_data.get("access_token")
+        if not access_token_str:
+            return HTMLResponse("Auth failed: Token error")
+            
+        user_info = await auth_provider.get_user_info(access_token_str)
+        if not user_info.provider_user_id:
+            return HTMLResponse("Auth failed: No UserId returned")
+            
+        # Find or Create User (handles Identity and OrgMember linking)
+        user, _is_new = await auth_provider.find_or_create_user(
+            db, user_info, tenant_id=tenant_id or provider.tenant_id
+        )
+    except Exception as e:
+        logger.exception(f"WeCom login/register error: {e}")
+        return HTMLResponse(f"Auth failed: {str(e)}")
+
+
+    # Standard login
+    token = create_access_token(str(user.id), user.role)
+
+    if state:
+        try:
+            sid = uuid.UUID(state)
+            s_res = await db.execute(select(SSOScanSession).where(SSOScanSession.id == sid))
+            session = s_res.scalar_one_or_none()
+            if session:
+                session.status = "authorized"
+                session.provider_type = "wecom"
+                session.user_id = user.id
+                session.access_token = token
+                session.error_msg = None
+                await db.commit()
+                return HTMLResponse(
+                    f"""<html><head><meta charset="utf-8" /></head>
+                    <body style="font-family: sans-serif; padding: 24px;">
+                        <div>SSO login successful. Redirecting...</div>
+                        <script>window.location.href = "/sso/entry?sid={sid}&complete=1";</script>
+                    </body></html>"""
+                )
+        except Exception as e:
+            logger.exception("Failed to update SSO session (wecom) %s", e)
+
+    return HTMLResponse(f"Logged in. Token: {token}")
