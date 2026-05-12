@@ -108,16 +108,10 @@ def get_skill_map(agent_id: UUID) -> dict[str, Any]:
 
     from app.services.agent_context import _agent_workspace
 
-    merged: dict[str, dict[str, str]] = {}
-
     skills_dir = _agent_workspace(agent_id) / "skills"
-    scanned = _scan_skills_dir(skills_dir)
-    for key, entry in scanned.items():
-        if key not in merged:
-            merged[key] = entry
-
-    _cache[cache_key] = (now, merged)
-    return merged
+    result = _scan_skills_dir(skills_dir)
+    _cache[cache_key] = (now, result)
+    return result
 
 
 def get_skill_map_for_api(agent_id: UUID) -> dict[str, Any]:
