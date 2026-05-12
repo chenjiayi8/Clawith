@@ -59,6 +59,49 @@ def upgrade() -> None:
         """
     )
 
+    # Legacy-schema compatibility: some long-lived installations still have the
+    # pre-refactor shape for users, tenants, tools, triggers, org tables, and
+    # agent templates. This migration is the current Alembic head in this
+    # branch, so it also normalizes those older schemas before the app boots.
+    for value in ("wechat", "whatsapp", "agentbay"):
+        op.execute(f"ALTER TYPE channel_type_enum ADD VALUE IF NOT EXISTS '{value}'")
+
+    for statement in [
+        "ALTER TABLE agent_triggers ADD COLUMN IF NOT EXISTS is_system BOOLEAN NOT NULL DEFAULT FALSE",
+        "ALTER TABLE agents ADD COLUMN IF NOT EXISTS cache_read_tokens_today INTEGER DEFAULT 0",
+        "ALTER TABLE agents ADD COLUMN IF NOT EXISTS cache_read_tokens_month INTEGER DEFAULT 0",
+        "ALTER TABLE agents ADD COLUMN IF NOT EXISTS cache_read_tokens_total INTEGER DEFAULT 0",
+        "ALTER TABLE agents ADD COLUMN IF NOT EXISTS cache_creation_tokens_today INTEGER DEFAULT 0",
+        "ALTER TABLE agents ADD COLUMN IF NOT EXISTS cache_creation_tokens_month INTEGER DEFAULT 0",
+        "ALTER TABLE agents ADD COLUMN IF NOT EXISTS cache_creation_tokens_total INTEGER DEFAULT 0",
+        "ALTER TABLE agents ADD COLUMN IF NOT EXISTS is_system BOOLEAN NOT NULL DEFAULT FALSE",
+        "ALTER TABLE agents ADD COLUMN IF NOT EXISTS access_mode VARCHAR(20) NOT NULL DEFAULT 'company'",
+        "ALTER TABLE agents ADD COLUMN IF NOT EXISTS company_access_level VARCHAR(20) NOT NULL DEFAULT 'use'",
+        "ALTER TABLE users ADD COLUMN IF NOT EXISTS identity_id UUID",
+        "ALTER TABLE users ADD COLUMN IF NOT EXISTS registration_source VARCHAR(50) DEFAULT 'web'",
+        "ALTER TABLE tenants ADD COLUMN IF NOT EXISTS country_region VARCHAR(10) NOT NULL DEFAULT '001'",
+        "ALTER TABLE tenants ADD COLUMN IF NOT EXISTS sso_enabled BOOLEAN NOT NULL DEFAULT FALSE",
+        "ALTER TABLE tenants ADD COLUMN IF NOT EXISTS sso_domain VARCHAR(255)",
+        "ALTER TABLE tenants ADD COLUMN IF NOT EXISTS a2a_async_enabled BOOLEAN NOT NULL DEFAULT FALSE",
+        "ALTER TABLE tenants ADD COLUMN IF NOT EXISTS default_model_id UUID",
+        "ALTER TABLE tenants ADD COLUMN IF NOT EXISTS utility_model_id UUID",
+        "ALTER TABLE tools ADD COLUMN IF NOT EXISTS source VARCHAR(20) NOT NULL DEFAULT 'builtin'",
+        "ALTER TABLE agent_templates ADD COLUMN IF NOT EXISTS default_mcp_servers JSON NOT NULL DEFAULT '[]'::json",
+        "ALTER TABLE agent_templates ADD COLUMN IF NOT EXISTS capability_bullets JSON NOT NULL DEFAULT '[]'::json",
+        "ALTER TABLE agent_templates ADD COLUMN IF NOT EXISTS bootstrap_content TEXT",
+        "ALTER TABLE org_members ADD COLUMN IF NOT EXISTS open_id VARCHAR(100)",
+        "ALTER TABLE org_members ADD COLUMN IF NOT EXISTS unionid VARCHAR(100)",
+        "ALTER TABLE org_members ADD COLUMN IF NOT EXISTS external_id VARCHAR(100)",
+        "ALTER TABLE org_members ADD COLUMN IF NOT EXISTS provider_id UUID",
+        "ALTER TABLE org_members ADD COLUMN IF NOT EXISTS user_id UUID",
+        "ALTER TABLE org_members ADD COLUMN IF NOT EXISTS name_translit_full VARCHAR(255)",
+        "ALTER TABLE org_members ADD COLUMN IF NOT EXISTS name_translit_initial VARCHAR(50)",
+        "ALTER TABLE agent_agent_relationships ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ",
+        "ALTER TABLE agent_agent_relationships ADD COLUMN IF NOT EXISTS created_by_user_id UUID",
+        "ALTER TABLE agent_agent_relationships ADD COLUMN IF NOT EXISTS updated_by_user_id UUID",
+    ]:
+        op.execute(statement)
+
     op.execute(
         """
         CREATE TABLE IF NOT EXISTS workspace_projects (
@@ -85,10 +128,11 @@ def upgrade() -> None:
         )
         """
     )
+    op.execute("ALTER TABLE workspace_projects ADD COLUMN IF NOT EXISTS tenant_id UUID REFERENCES tenants(id) ON DELETE SET NULL")
+    op.execute("ALTER TABLE workspace_projects ADD COLUMN IF NOT EXISTS dockerfile_path VARCHAR(500)")
     op.execute("CREATE INDEX IF NOT EXISTS ix_workspace_projects_slug ON workspace_projects(slug)")
     op.execute("CREATE INDEX IF NOT EXISTS ix_workspace_projects_created_at ON workspace_projects(created_at)")
     op.execute("CREATE INDEX IF NOT EXISTS ix_workspace_projects_tenant_id ON workspace_projects(tenant_id)")
-    op.execute("ALTER TABLE workspace_projects ADD COLUMN IF NOT EXISTS tenant_id UUID REFERENCES tenants(id) ON DELETE SET NULL")
     op.execute(
         """
         UPDATE workspace_projects wp
