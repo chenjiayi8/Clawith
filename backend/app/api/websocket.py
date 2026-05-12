@@ -33,7 +33,7 @@ async def _resolve_skill_content(
     """Resolve skill content by colon key lookup."""
     import asyncio
 
-    from app.services.agent_context import PERSISTENT_DATA, TOOL_WORKSPACE
+    from app.services.agent_context import _agent_workspace
     from app.services.skill_map import get_skill_map
 
     skill_map = get_skill_map(agent_id)
@@ -45,20 +45,20 @@ async def _resolve_skill_content(
     if not file_rel:
         return None, None, None
 
-    for ws_root in [TOOL_WORKSPACE / str(agent_id), PERSISTENT_DATA / str(agent_id)]:
-        file_path = (ws_root / "skills" / file_rel).resolve()
-        skills_root = (ws_root / "skills").resolve()
-        if not str(file_path).startswith(str(skills_root)):
-            continue
-        if file_path.exists():
-            content = await asyncio.to_thread(
-                file_path.read_text,
-                encoding="utf-8",
-                errors="replace",
-            )
-            return content, entry.get("name", skill_key), entry.get("emoji", "")
+    ws_root = _agent_workspace(agent_id)
+    file_path = (ws_root / "skills" / file_rel).resolve()
+    skills_root = (ws_root / "skills").resolve()
+    if not str(file_path).startswith(str(skills_root)):
+        return None, None, None
+    if not file_path.exists():
+        return None, None, None
 
-    return None, None, None
+    content = await asyncio.to_thread(
+        file_path.read_text,
+        encoding="utf-8",
+        errors="replace",
+    )
+    return content, entry.get("name", skill_key), entry.get("emoji", "")
 
 
 async def _persist_and_inject_skill(
