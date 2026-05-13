@@ -5,22 +5,22 @@ import re
 import uuid
 from datetime import datetime, timezone as tz
 
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Query
+from fastapi import APIRouter, Depends, Query, WebSocket, WebSocketDisconnect
 from loguru import logger
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import selectinload
 
 from app.core.security import decode_access_token
 from app.core.permissions import check_agent_access, is_agent_expired
-from app.database import async_session
+from app.core.security import get_current_user
+from app.database import async_session, get_db
 from app.models.agent import Agent
 from app.models.audit import ChatMessage
 from app.models.chat_session import ChatSession
 from app.models.llm import LLMModel
 from app.models.user import User
 from app.services.chat_session_service import ensure_primary_platform_session
-from app.services.llm import call_llm, call_llm_with_failover
+from app.services.llm import call_llm_with_failover
 
 router = APIRouter(tags=["websocket"])
 
@@ -246,13 +246,6 @@ async def maybe_mark_session_read_for_active_viewer(
     session.last_read_at_by_user = datetime.now(tz.utc)
     return True
 
-
-from fastapi import Depends
-from app.core.security import get_current_user
-from app.database import get_db
-from app.models.user import User
-
-
 @router.get("/api/chat/{agent_id}/history")
 async def get_chat_history(
     agent_id: uuid.UUID,
@@ -394,7 +387,6 @@ async def websocket_chat(
             # Resolve or create chat session
             from app.models.chat_session import ChatSession
             from sqlalchemy import select as _sel
-            from datetime import datetime as _dt, timezone as _tz
             conv_id = session_id
             if conv_id:
                 # Validate the session belongs to this agent and to this user.
@@ -427,8 +419,8 @@ async def websocket_chat(
                         ChatSession.agent_id == agent_id,
                         ChatSession.user_id == user_id,
                         ChatSession.source_channel == "web",
-                        ChatSession.is_group == False,
-                        ChatSession.is_primary == True,
+                        ChatSession.is_group.is_(False),
+                        ChatSession.is_primary.is_(True),
                     )
                     .order_by(ChatSession.last_message_at.desc().nulls_last(), ChatSession.created_at.desc())
                     .limit(1)
@@ -653,7 +645,7 @@ async def websocket_chat(
             try:
                 from app.services.quota_guard import (
                     check_conversation_quota, increment_conversation_usage,
-                    check_agent_expired, check_agent_llm_quota, increment_agent_llm_usage,
+                    check_agent_expired, increment_agent_llm_usage,
                     QuotaExceeded, AgentExpired,
                 )
                 await check_conversation_quota(user_id)
@@ -1044,7 +1036,7 @@ async def websocket_chat(
                                 websocket.receive_json(), timeout=0.5
                             )
                             if msg.get("type") == "abort":
-                                logger.info(f"[WS] Abort received, cancelling LLM task")
+                                logger.info("[WS] Abort received, cancelling LLM task")
                                 llm_task.cancel()
                                 aborted = True
                                 break
