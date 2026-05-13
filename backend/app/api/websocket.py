@@ -375,6 +375,7 @@ async def websocket_chat(
                 await websocket.close(code=4001)
                 return
 
+            _tenant_id = user.tenant_id  # Capture for title generation
             logger.info(f"[WS] Checking agent access for {agent_id}")
             agent, _ = await check_agent_access(db, user, agent_id)
             # Check agent expiry
@@ -697,70 +698,71 @@ async def websocket_chat(
                 await websocket.send_json({"type": "done", "role": "assistant", "content": f"⚠️ {ae.message}"})
                 continue
 
-            # Add user message to conversation (full LLM context)
-            conversation.append({"role": "user", "content": content})
+            if not skip_user_save:
+                # Add user message to conversation (full LLM context)
+                conversation.append({"role": "user", "content": content})
 
-            # Save user message to DB.
-            #
-            # Bootstrap trigger: the user never sent anything — the frontend
-            # fired a synthetic turn so the agent could greet first. Don't
-            # persist and don't title the session from it.
-            #
-            # If the LLM content contains [image_data:...] markers, persist the full
-            # payload so subsequent turns can still forward the image to the model.
-            has_image_marker = "[image_data:" in content
-            if has_image_marker:
-                saved_content = f"[file:{file_name}]\n{content}" if file_name else content
-            else:
-                saved_content = display_content if display_content else content
-                if file_name:
-                    saved_content = f"[file:{file_name}]\n{saved_content}"
-            if is_onboarding_trigger:
-                logger.info("[WS] Onboarding trigger — skipping user-message persistence")
-                # Title this session "Onboarding" up front so it's identifiable
-                # in the session list even before the user has typed anything.
-                # The auto-title logic in the normal path only overwrites titles
-                # that start with "Session ", so this stays sticky.
-                async with async_session() as _sdb:
-                    from app.models.chat_session import ChatSession as _CS
-                    _sr = await _sdb.execute(
-                        select(_CS).where(_CS.id == uuid.UUID(conv_id))
-                    )
-                    _s = _sr.scalar_one_or_none()
-                    if _s and _s.title.startswith("Session "):
-                        _s.title = "Onboarding"
-                        await _sdb.commit()
-            else:
-                async with async_session() as db:
-                    user_msg = ChatMessage(
-                        agent_id=agent_id,
-                        user_id=user_id,
-                        role="user",
-                        content=saved_content,
-                        conversation_id=conv_id,
-                    )
-                    db.add(user_msg)
-                    # Update session last_message_at + auto-title on first message
-                    from app.models.chat_session import ChatSession as _CS
-                    from datetime import datetime as _dt2, timezone as _tz2
-                    _now = _dt2.now(_tz2.utc)
-                    _sess_r = await db.execute(
-                        select(_CS).where(_CS.id == uuid.UUID(conv_id))
-                    )
-                    _sess = _sess_r.scalar_one_or_none()
-                    if _sess:
-                        _sess.last_message_at = _now
-                        if not history_messages and _sess.title.startswith("Session "):
-                            # Use display_content for title (avoids raw base64/markers)
-                            title_src = display_content if display_content else content
-                            # Clean up common prefixes from image/file messages
-                            clean_title = title_src.replace("[图片] ", "📷 ").replace("[image_data:", "").strip()
-                            if file_name and not clean_title:
-                                clean_title = f"📎 {file_name}"
-                            _sess.title = clean_title[:40] if clean_title else content[:40]
-                    await db.commit()
-                logger.info("[WS] User message saved")
-                await websocket.send_json({"type": "user_saved", "message_id": str(user_msg.id)})
+                # Save user message to DB.
+                #
+                # Bootstrap trigger: the user never sent anything — the frontend
+                # fired a synthetic turn so the agent could greet first. Don't
+                # persist and don't title the session from it.
+                #
+                # If the LLM content contains [image_data:...] markers, persist the full
+                # payload so subsequent turns can still forward the image to the model.
+                has_image_marker = "[image_data:" in content
+                if has_image_marker:
+                    saved_content = f"[file:{file_name}]\n{content}" if file_name else content
+                else:
+                    saved_content = display_content if display_content else content
+                    if file_name:
+                        saved_content = f"[file:{file_name}]\n{saved_content}"
+                if is_onboarding_trigger:
+                    logger.info("[WS] Onboarding trigger — skipping user-message persistence")
+                    # Title this session "Onboarding" up front so it's identifiable
+                    # in the session list even before the user has typed anything.
+                    # The auto-title logic in the normal path only overwrites titles
+                    # that start with "Session ", so this stays sticky.
+                    async with async_session() as _sdb:
+                        from app.models.chat_session import ChatSession as _CS
+                        _sr = await _sdb.execute(
+                            select(_CS).where(_CS.id == uuid.UUID(conv_id))
+                        )
+                        _s = _sr.scalar_one_or_none()
+                        if _s and _s.title.startswith("Session "):
+                            _s.title = "Onboarding"
+                            await _sdb.commit()
+                else:
+                    async with async_session() as db:
+                        user_msg = ChatMessage(
+                            agent_id=agent_id,
+                            user_id=user_id,
+                            role="user",
+                            content=saved_content,
+                            conversation_id=conv_id,
+                        )
+                        db.add(user_msg)
+                        # Update session last_message_at + auto-title on first message
+                        from app.models.chat_session import ChatSession as _CS
+                        from datetime import datetime as _dt2, timezone as _tz2
+                        _now = _dt2.now(_tz2.utc)
+                        _sess_r = await db.execute(
+                            select(_CS).where(_CS.id == uuid.UUID(conv_id))
+                        )
+                        _sess = _sess_r.scalar_one_or_none()
+                        if _sess:
+                            _sess.last_message_at = _now
+                            if not history_messages and _sess.title.startswith("Session "):
+                                # Use display_content for title (avoids raw base64/markers)
+                                title_src = display_content if display_content else content
+                                # Clean up common prefixes from image/file messages
+                                clean_title = title_src.replace("[图片] ", "📷 ").replace("[image_data:", "").strip()
+                                if file_name and not clean_title:
+                                    clean_title = f"📎 {file_name}"
+                                _sess.title = clean_title[:40] if clean_title else content[:40]
+                        await db.commit()
+                    logger.info("[WS] User message saved")
+                    await websocket.send_json({"type": "user_saved", "message_id": str(user_msg.id)})
 
             # ── OpenClaw routing: insert into gateway_messages instead of LLM ──
             if agent_type == "openclaw":

@@ -106,11 +106,25 @@ def get_skill_map(agent_id: UUID) -> dict[str, Any]:
         if now - ts < _CACHE_TTL:
             return result
 
-    from app.services.agent_context import TOOL_WORKSPACE, PERSISTENT_DATA
+    from app.services import agent_context
 
     merged: dict[str, dict[str, str]] = {}
 
-    for ws_root in [TOOL_WORKSPACE / str(agent_id), PERSISTENT_DATA / str(agent_id)]:
+    canonical_root = agent_context._agent_workspace(agent_id)
+    roots: list[Path] = [canonical_root]
+
+    tool_workspace = getattr(agent_context, "TOOL_WORKSPACE", None)
+    persistent_data = getattr(agent_context, "PERSISTENT_DATA", None)
+    if tool_workspace is not None:
+        roots.append(tool_workspace / str(agent_id))
+    if persistent_data is not None:
+        roots.append(persistent_data / str(agent_id))
+
+    seen_roots: set[Path] = set()
+    for ws_root in roots:
+        if ws_root in seen_roots:
+            continue
+        seen_roots.add(ws_root)
         skills_dir = ws_root / "skills"
         scanned = _scan_skills_dir(skills_dir)
         for key, entry in scanned.items():

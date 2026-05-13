@@ -106,24 +106,30 @@ async def list_sessions(
             for row in count_res.all():
                 message_counts[row[0]] = row[1]
 
-            unread_res = await db.execute(
-                select(ChatSession.id, func.count(ChatMessage.id))
-                .join(ChatMessage, ChatMessage.conversation_id == cast(ChatSession.id, String))
-                .where(
-                    ChatSession.id.in_(session_uuid_ids),
-                    ChatSession.user_id == current_user.id,
-                    ChatSession.source_channel.notin_(["agent", "trigger"]),
-                    ChatSession.is_group == False,
-                    ChatMessage.role.in_(["assistant", "system", "tool_call"]),
-                    ChatMessage.created_at > func.coalesce(
-                        ChatSession.last_read_at_by_user,
-                        datetime(1970, 1, 1, tzinfo=tz.utc),
-                    ),
+            if any(
+                str(s.user_id) == str(current_user.id)
+                and not s.is_group
+                and s.source_channel not in ("agent", "trigger")
+                for s in sessions
+            ):
+                unread_res = await db.execute(
+                    select(ChatSession.id, func.count(ChatMessage.id))
+                    .join(ChatMessage, ChatMessage.conversation_id == cast(ChatSession.id, String))
+                    .where(
+                        ChatSession.id.in_(session_uuid_ids),
+                        ChatSession.user_id == current_user.id,
+                        ChatSession.source_channel.notin_(["agent", "trigger"]),
+                        ChatSession.is_group == False,
+                        ChatMessage.role.in_(["assistant", "system", "tool_call"]),
+                        ChatMessage.created_at > func.coalesce(
+                            ChatSession.last_read_at_by_user,
+                            datetime(1970, 1, 1, tzinfo=tz.utc),
+                        ),
+                    )
+                    .group_by(ChatSession.id)
                 )
-                .group_by(ChatSession.id)
-            )
-            for row in unread_res.all():
-                unread_counts[str(row[0])] = int(row[1] or 0)
+                for row in unread_res.all():
+                    unread_counts[str(row[0])] = int(row[1] or 0)
 
         # Collect IDs to resolve in bulk
         from app.models.user import Identity
@@ -174,21 +180,21 @@ async def list_sessions(
             else:
                 display = user_names.get(str(session.user_id), "Unknown")
 
-            out.append(SessionOut(
-                id=str(session.id),
-                agent_id=str(session.agent_id),
-                user_id=str(session.user_id),
-                username=display,
+                out.append(SessionOut(
+                    id=str(session.id),
+                    agent_id=str(session.agent_id),
+                    user_id=str(session.user_id),
+                    username=display,
                 source_channel=session.source_channel,
                 title=session.title,
-                created_at=session.created_at.isoformat(),
-                last_message_at=session.last_message_at.isoformat() if session.last_message_at else None,
-                message_count=count,
-                unread_count=unread_counts.get(str(session.id), 0),
-                is_primary=bool(session.is_primary),
-                peer_agent_id=peer_agent_id,
-                peer_agent_name=peer_agent_name,
-                participant_type="group" if session.is_group else participant_type,
+                    created_at=session.created_at.isoformat(),
+                    last_message_at=session.last_message_at.isoformat() if session.last_message_at else None,
+                    message_count=count,
+                    unread_count=unread_counts.get(str(session.id), 0),
+                    is_primary=bool(getattr(session, "is_primary", False)),
+                    peer_agent_id=peer_agent_id,
+                    peer_agent_name=peer_agent_name,
+                    participant_type="group" if session.is_group else participant_type,
                 is_group=session.is_group,
                 group_name=session.group_name,
             ))
@@ -419,7 +425,9 @@ async def get_session_messages(
 
         if m.role == "tool_call":
             import json
-            entry: dict = {"id": str(m.id), "role": m.role, "content": m.content, "created_at": m.created_at.isoformat() if m.created_at else None}
+            entry: dict = {"role": m.role, "content": m.content, "created_at": m.created_at.isoformat() if m.created_at else None}
+            if getattr(m, "id", None):
+                entry["id"] = str(m.id)
             try:
                 data = json.loads(m.content)
                 entry["content"] = ""
@@ -447,7 +455,9 @@ async def get_session_messages(
                     part["participant_id"] = str(m.participant_id)
                 out.append(part)
         else:
-            entry = {"id": str(m.id), "role": m.role, "content": m.content, "created_at": m.created_at.isoformat() if m.created_at else None}
+            entry = {"role": m.role, "content": m.content, "created_at": m.created_at.isoformat() if m.created_at else None}
+            if getattr(m, "id", None):
+                entry["id"] = str(m.id)
             if getattr(m, 'is_hidden', False):
                 entry["is_hidden"] = True
             if hasattr(m, 'thinking') and m.thinking:
