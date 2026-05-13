@@ -60,6 +60,31 @@ Please describe:
    - Frontend: TypeScript — standard React conventions
 5. Use `Fixes #<issue_number>` in the PR description
 
+## GitHub Actions CI/CD
+
+GitHub Actions is now the active in-repo CI/CD path after the Drone pipeline was removed.
+
+- Pull requests to `main` run CI automatically.
+- On pushes to `main`, production deployment runs after CI succeeds.
+- Production deployment uses the GitHub Actions `production` environment.
+
+Current verification boundary for this first migration:
+
+- Covered now: backend/frontend CI plus the production deploy workflow.
+- Not yet covered as a full replacement: the old Drone deploy-test and upgrade-test rehearsal coverage.
+
+For maintainers setting up the production environment bootstrap in GitHub Actions, configure these environment secrets with GitHub CLI:
+
+```bash
+gh secret set SSH_HOST --env production --body "ai-company.growatt-support.com"
+gh secret set SSH_USER --env production --body "ubuntu"
+gh secret set SSH_PRIVATE_KEY --env production < ~/.ssh/your_key
+# Optional
+gh secret set SSH_PORT --env production --body "22"
+# Optional
+gh secret set SSH_KNOWN_HOSTS --env production < ~/.ssh/known_hosts
+```
+
 ## Working on Multiple Features
 
 It is common to develop several improvements in one sitting before submitting. Rather than sending one giant PR, please split your work into smaller, focused PRs — this makes review faster and merges cleaner.
