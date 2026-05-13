@@ -10,7 +10,7 @@ class _NoopLogger:
 
 sys.modules.setdefault("loguru", SimpleNamespace(logger=_NoopLogger()))
 
-from app.services import agent_context, skill_map
+from app.services import agent_context, skill_map  # noqa: E402
 
 
 def _write_skill(root, agent_id: uuid.UUID, folder: str = "qa") -> str:
