@@ -27,6 +27,7 @@ jobs:
           fetch-depth: 0
 
       - name: Confirm workflow_run SHA is still current on origin/main
+        id: freshness
         env:
           DEPLOY_SHA: ${{ github.event.workflow_run.head_sha }}
         run: |
@@ -38,10 +39,14 @@ jobs:
 
           if [[ "$DEPLOY_SHA" != "$MAIN_HEAD" ]]; then
             echo "Skipping stale deploy candidate: workflow_run SHA $DEPLOY_SHA is behind current origin/main $MAIN_HEAD" >&2
-            exit 1
+            echo "proceed=false" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
 
+          echo "proceed=true" >> "$GITHUB_OUTPUT"
+
       - name: Configure SSH
+        if: ${{ steps.freshness.outputs.proceed == 'true' }}
         env:
           SSH_HOST: ${{ secrets.SSH_HOST }}
           SSH_USER: ${{ secrets.SSH_USER }}
@@ -53,6 +58,7 @@ jobs:
           : "${SSH_HOST:?SSH_HOST is required}"
           : "${SSH_USER:?SSH_USER is required}"
           : "${SSH_PRIVATE_KEY:?SSH_PRIVATE_KEY is required}"
+          : "${SSH_KNOWN_HOSTS:?SSH_KNOWN_HOSTS is required}"
 
           mkdir -p ~/.ssh
           chmod 700 ~/.ssh
@@ -62,15 +68,11 @@ jobs:
 
           SSH_PORT="${SSH_PORT:-22}"
 
-          if [[ -n "${SSH_KNOWN_HOSTS:-}" ]]; then
-            printf '%s\n' "$SSH_KNOWN_HOSTS" > ~/.ssh/known_hosts
-          else
-            # Preserve the planned fallback for environments that do not pre-seed SSH_KNOWN_HOSTS.
-            ssh-keyscan -p "$SSH_PORT" -H "$SSH_HOST" >> ~/.ssh/known_hosts
-          fi
+          printf '%s\n' "$SSH_KNOWN_HOSTS" > ~/.ssh/known_hosts
           chmod 644 ~/.ssh/known_hosts
 
       - name: Deploy to production
+        if: ${{ steps.freshness.outputs.proceed == 'true' }}
         env:
           SSH_HOST: ${{ secrets.SSH_HOST }}
           SSH_USER: ${{ secrets.SSH_USER }}
