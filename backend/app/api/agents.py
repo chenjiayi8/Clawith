@@ -30,7 +30,7 @@ async def _get_active_admin_users(db: AsyncSession, tenant_id: uuid.UUID | None)
     result = await db.execute(
         select(User).where(
             User.tenant_id == tenant_id,
-            User.is_active == True,  # noqa: E712
+            User.is_active.is_(True),
             User.role.in_(["platform_admin", "org_admin"]),
         )
     )
