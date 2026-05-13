@@ -2433,8 +2433,7 @@ export default function AgentDetailPage() {
                 const processed: ChatMsg[] = [];
                 for (const m of msgs) {
                     if (m.is_hidden) {
-                        const firstLine = (m.content || '').split('
-')[0].replace(/^#\s*/, '').replace(/^---$/, '').trim();
+                        const firstLine = (m.content || '').split('\n')[0].replace(/^#\s*/, '').replace(/^---$/, '').trim();
                         processed.push({ role: 'assistant', content: firstLine || 'Skill loaded', isSkillIndicator: true, hiddenContent: m.content, id: m.id, timestamp: m.created_at });
                         continue;
                     }
@@ -2642,7 +2641,7 @@ export default function AgentDetailPage() {
 
     const chatEndRef = useRef<HTMLDivElement>(null);
     const chatContainerRef = useRef<HTMLDivElement>(null);
-    const chatInputRef = useRef<HTMLInputElement>(null);
+    const chatInputRef = useRef<HTMLTextAreaElement>(null);
     const chatInputAreaRef = useRef<HTMLDivElement>(null);
     const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -3974,7 +3973,7 @@ export default function AgentDetailPage() {
     const { data: schedules = [] } = useQuery({
         queryKey: ['schedules', id],
         queryFn: () => scheduleApi.list(id!),
-        enabled: !!id && activeTab === 'tasks',
+        enabled: !!id && activeTab === 'aware',
     });
 
     // Schedule form state
@@ -4056,7 +4055,7 @@ export default function AgentDetailPage() {
         if (activeTab !== 'chat') return;
         queryClient.refetchQueries({ queryKey: ['llm-models'] });
         queryClient.refetchQueries({ queryKey: ['tenant', 'me'] });
-    }, [activeTab, location.key, queryClient]);
+    }, [activeTab, queryClient]);
 
     const enabledLlmModels = useMemo(
         () => (llmModels as any[]).filter((m: any) => m.enabled),

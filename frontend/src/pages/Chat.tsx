@@ -413,6 +413,7 @@ export default function Chat() {
             .then(r => r.json())
             .then((history: any[]) => {
                 if (history.length > 0) {
+                    const processed: Message[] = [];
                     for (const h of history) {
                         if (h.is_hidden) {
                             const firstLine = (h.content || '').split('\n')[0].replace(/^#\s*/, '').trim();
