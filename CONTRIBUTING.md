@@ -79,10 +79,9 @@ For maintainers setting up the production environment bootstrap in GitHub Action
 gh secret set SSH_HOST --env production --body "ai-company.growatt-support.com"
 gh secret set SSH_USER --env production --body "ubuntu"
 gh secret set SSH_PRIVATE_KEY --env production < ~/.ssh/your_key
+gh secret set SSH_KNOWN_HOSTS --env production < ~/.ssh/known_hosts
 # Optional
 gh secret set SSH_PORT --env production --body "22"
-# Optional
-gh secret set SSH_KNOWN_HOSTS --env production < ~/.ssh/known_hosts
 ```
 
 ## Working on Multiple Features
