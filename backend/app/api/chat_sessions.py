@@ -180,21 +180,21 @@ async def list_sessions(
             else:
                 display = user_names.get(str(session.user_id), "Unknown")
 
-                out.append(SessionOut(
-                    id=str(session.id),
-                    agent_id=str(session.agent_id),
-                    user_id=str(session.user_id),
-                    username=display,
+            out.append(SessionOut(
+                id=str(session.id),
+                agent_id=str(session.agent_id),
+                user_id=str(session.user_id),
+                username=display,
                 source_channel=session.source_channel,
                 title=session.title,
-                    created_at=session.created_at.isoformat(),
-                    last_message_at=session.last_message_at.isoformat() if session.last_message_at else None,
-                    message_count=count,
-                    unread_count=unread_counts.get(str(session.id), 0),
-                    is_primary=bool(getattr(session, "is_primary", False)),
-                    peer_agent_id=peer_agent_id,
-                    peer_agent_name=peer_agent_name,
-                    participant_type="group" if session.is_group else participant_type,
+                created_at=session.created_at.isoformat(),
+                last_message_at=session.last_message_at.isoformat() if session.last_message_at else None,
+                message_count=count,
+                unread_count=unread_counts.get(str(session.id), 0),
+                is_primary=bool(getattr(session, "is_primary", False)),
+                peer_agent_id=peer_agent_id,
+                peer_agent_name=peer_agent_name,
+                participant_type="group" if session.is_group else participant_type,
                 is_group=session.is_group,
                 group_name=session.group_name,
             ))

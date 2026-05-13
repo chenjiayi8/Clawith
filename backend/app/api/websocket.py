@@ -34,7 +34,7 @@ async def _resolve_skill_content(
     """Resolve skill content by colon key lookup."""
     import asyncio
 
-    from app.services.agent_context import TOOL_WORKSPACE, PERSISTENT_DATA
+    from app.services.agent_context import _agent_workspace
     from app.services.skill_map import get_skill_map
 
     skill_map = get_skill_map(agent_id)
@@ -46,22 +46,20 @@ async def _resolve_skill_content(
     if not file_rel:
         return None, None, None
 
-    for ws_root in [TOOL_WORKSPACE / str(agent_id), PERSISTENT_DATA / str(agent_id)]:
-        file_path = (ws_root / "skills" / file_rel).resolve()
-        skills_root = (ws_root / "skills").resolve()
-        if not str(file_path).startswith(str(skills_root)):
-            continue
-        if not file_path.exists():
-            continue
+    ws_root = _agent_workspace(agent_id)
+    file_path = (ws_root / "skills" / file_rel).resolve()
+    skills_root = (ws_root / "skills").resolve()
+    if not str(file_path).startswith(str(skills_root)):
+        return None, None, None
+    if not file_path.exists():
+        return None, None, None
 
-        content = await asyncio.to_thread(
-            file_path.read_text,
-            encoding="utf-8",
-            errors="replace",
-        )
-        return content, entry.get("name", skill_key), entry.get("emoji", "")
-
-    return None, None, None
+    content = await asyncio.to_thread(
+        file_path.read_text,
+        encoding="utf-8",
+        errors="replace",
+    )
+    return content, entry.get("name", skill_key), entry.get("emoji", "")
 
 
 async def _persist_and_inject_skill(
@@ -118,37 +116,6 @@ async def _inject_skill_if_matched(
         )
     elif ":" in skill_key:
         await websocket.send_json({"type": "skill_error", "message": f"Skill '{skill_key}' not found"})
-
-
-def _find_retry_anchor_message(messages: list, requested_message_id: str | None = None):
-    """Find the visible user message a retry/regenerate request should replay.
-
-    Rules:
-    - If `requested_message_id` points at a user message, retry that turn.
-    - If it points at an assistant/tool message, retry the nearest preceding
-      visible user message.
-    - If omitted, retry the most recent visible user message in the thread.
-    Hidden skill-injection messages are never used as retry anchors.
-    """
-    if not messages:
-        return None
-
-    target_index = len(messages) - 1
-    if requested_message_id:
-        requested = str(requested_message_id)
-        for idx, msg in enumerate(messages):
-            msg_id = getattr(msg, "id", None)
-            if msg_id and str(msg_id) == requested:
-                target_index = idx
-                break
-        else:
-            return None
-
-    for idx in range(target_index, -1, -1):
-        msg = messages[idx]
-        if getattr(msg, "role", None) == "user" and not getattr(msg, "is_hidden", False):
-            return msg
-    return None
 
 
 def _rebuild_conversation_from_messages(

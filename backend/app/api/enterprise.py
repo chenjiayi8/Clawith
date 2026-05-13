@@ -581,7 +581,16 @@ async def update_tenant_quotas(
             tenant.utility_model_id = None
         else:
             import uuid as _uuid
-            tenant.utility_model_id = _uuid.UUID(data.utility_model_id)
+            model_id = _uuid.UUID(data.utility_model_id)
+            model_result = await db.execute(select(LLMModel).where(LLMModel.id == model_id))
+            model = model_result.scalar_one_or_none()
+            if not model:
+                raise HTTPException(status_code=404, detail="Model not found")
+            if not model.tenant_id or model.tenant_id != current_user.tenant_id:
+                raise HTTPException(status_code=400, detail="Model is not tenant-scoped to this tenant")
+            if not model.enabled:
+                raise HTTPException(status_code=400, detail="Model is disabled")
+            tenant.utility_model_id = model.id
 
     await db.commit()
     return {
