@@ -58,7 +58,7 @@ interface Message {
     imageUrl?: string;
     timestamp?: string;
     isSkillIndicator?: boolean;
-<<<<<<< HEAD
+    hiddenContent?: string | null;
     _isToolGroup?: boolean;
 }
 
@@ -264,9 +264,6 @@ function ChatToolChain({ toolCalls }: { toolCalls: ToolCall[] }) {
             )}
         </div>
     );
-=======
-    hiddenContent?: string | null;
->>>>>>> f98d300 (feat: skill indicator debug drawer with hidden message content)
 }
 
 export default function Chat() {
@@ -288,13 +285,10 @@ export default function Chat() {
     const [editingId, setEditingId] = useState<string | null>(null);
     const [editContent, setEditContent] = useState('');
     const [attachedFile, setAttachedFile] = useState<{ name: string; text: string; path?: string; imageUrl?: string } | null>(null);
-<<<<<<< HEAD
     const [liveState, setLiveState] = useState<LivePreviewState>({});
     const [livePanelVisible, setLivePanelVisible] = useState(false);
     const [wsSessionId, setWsSessionId] = useState<string>('');
-=======
     const [drawerContent, setDrawerContent] = useState<{ name: string; content: string } | null>(null);
->>>>>>> f98d300 (feat: skill indicator debug drawer with hidden message content)
     const wsRef = useRef<WebSocket | null>(null);
     const messagesEndRef = useRef<HTMLDivElement>(null);
     const messagesContainerRef = useRef<HTMLDivElement>(null);
@@ -302,7 +296,7 @@ export default function Chat() {
     const userPinnedAwayFromBottomRef = useRef(false);
     const fileInputRef = useRef<HTMLInputElement>(null);
     // Ref to the chat textarea for direct DOM height manipulation
-    const inputRef = useRef<HTMLInputElement>(null);
+    const inputRef = useRef<HTMLTextAreaElement>(null);
     const pendingToolCalls = useRef<ToolCall[]>([]);
     const streamContent = useRef('');
     const thinkingContent = useRef('');
@@ -419,10 +413,19 @@ export default function Chat() {
             .then(r => r.json())
             .then((history: any[]) => {
                 if (history.length > 0) {
-<<<<<<< HEAD
-                    // Group consecutive tool_call entries into _isToolGroup messages
-                    const processed: Message[] = [];
                     for (const h of history) {
+                        if (h.is_hidden) {
+                            const firstLine = (h.content || '').split('\n')[0].replace(/^#\s*/, '').trim();
+                            processed.push({
+                                role: 'assistant',
+                                content: firstLine || 'Skill loaded',
+                                isSkillIndicator: true,
+                                hiddenContent: h.content,
+                                id: h.id,
+                                timestamp: h.created_at || undefined,
+                            });
+                            continue;
+                        }
                         if (h.role === 'tool_call') {
                             const tc: ToolCall = {
                                 name: h.toolName || h.tool_name || '',
@@ -431,14 +434,11 @@ export default function Chat() {
                             };
                             const last = processed[processed.length - 1];
                             if (last && last._isToolGroup) {
-                                // Merge into existing tool group
                                 last.toolCalls = [...(last.toolCalls || []), tc];
                             } else if (last && last.role === 'assistant' && !(last.content && last.content.trim())) {
-                                // Previous is empty assistant — convert to tool group
                                 last._isToolGroup = true;
                                 last.toolCalls = [...(last.toolCalls || []), tc];
                             } else {
-                                // Start new tool group
                                 processed.push({
                                     role: 'assistant', content: '', toolCalls: [tc],
                                     timestamp: h.created_at || undefined,
@@ -451,27 +451,6 @@ export default function Chat() {
                             msg.timestamp = h.created_at || undefined;
                             processed.push(msg);
                         }
-=======
-                    const processed: any[] = [];
-                    for (const h of history) {
-                        if (h.is_hidden) {
-                            // Reconstruct skill indicator from hidden message
-                            const firstLine = (h.content || '').split('\n')[0].replace(/^#\s*/, '').trim();
-                            processed.push({
-                                role: 'assistant' as const,
-                                content: firstLine || 'Skill loaded',
-                                isSkillIndicator: true,
-                                hiddenContent: h.content,
-                                id: h.id,
-                                timestamp: h.created_at || undefined,
-                            });
-                            continue;
-                        }
-                        const msg = parseMessage({ role: h.role, content: h.content, fileName: h.fileName, toolCalls: h.toolCalls, thinking: h.thinking, imageUrl: h.imageUrl });
-                        msg.id = h.id;
-                        msg.timestamp = h.created_at || undefined;
-                        processed.push(msg);
->>>>>>> f98d300 (feat: skill indicator debug drawer with hidden message content)
                     }
                     setMessages(processed);
                 }
