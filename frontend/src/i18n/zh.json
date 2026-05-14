@@ -1176,11 +1176,6 @@
       "testSuccess": "OK ({{latency}}ms)",
       "testFailed": "测试失败: {{error}}\n\n延迟: {{latency}}ms",
       "testError": "测试错误: {{message}}",
-      "editModel": "编辑模型",
-      "vision": "视觉",
-      "temperature": "模型温度",
-      "temperaturePlaceholder": "例如 0.7 或 1.0（留空使用默认值）",
-      "temperatureDesc": "留空使用提供商默认值。o1/o3 推理模型通常需要 1.0",
       "utilityModel": "辅助模型",
       "utilityModelDesc": "用于后台任务，如自动生成会话标题。从已添加的模型中选择。",
       "noUtilityModel": "无（使用默认行为）"

@@ -53,6 +53,8 @@ class ChatSession(Base):
     # Tracks when the owning platform user last opened/read this session. Unread badges are derived
     # from non-user messages created after this timestamp.
     last_read_at_by_user: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Once a user manually renames a session, auto-title generation should stop overwriting it.
+    title_edited: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false", nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
     last_message_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     title_edited: Mapped[bool] = mapped_column(Boolean, server_default="false", nullable=False)

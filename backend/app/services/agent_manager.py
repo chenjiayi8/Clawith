@@ -155,12 +155,6 @@ class AgentManager:
                 },
             },
         }
-
-        if model:
-            config["env"] = {
-                f"{model.provider.upper()}_API_KEY": get_model_api_key(model),
-            }
-
         return config
 
     async def start_container(self, db: AsyncSession, agent: Agent) -> str | None:
@@ -197,6 +191,12 @@ class AgentManager:
         container_port = 18789 + hash(str(agent.id)) % 10000
 
         try:
+            environment = {
+                "OPENCLAW_GATEWAY_TOKEN": str(uuid.uuid4()),
+            }
+            if model:
+                environment[f"{model.provider.upper()}_API_KEY"] = get_model_api_key(model)
+
             container = self.docker_client.containers.run(
                 settings.OPENCLAW_IMAGE,
                 detach=True,
@@ -206,9 +206,7 @@ class AgentManager:
                 volumes={
                     str(agent_dir): {"bind": "/home/node/.openclaw", "mode": "rw"},
                 },
-                environment={
-                    "OPENCLAW_GATEWAY_TOKEN": str(uuid.uuid4()),
-                },
+                environment=environment,
                 restart_policy={"Name": "unless-stopped"},
                 labels={
                     "clawith.agent_id": str(agent.id),

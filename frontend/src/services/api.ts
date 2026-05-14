@@ -99,6 +99,28 @@ async function uploadFile(url: string, file: File, extraFields?: Record<string, 
     return res.json();
 }
 
+async function postFormData<T>(url: string, formData: FormData): Promise<T> {
+    const token = localStorage.getItem('token');
+    const res = await fetch(`${API_BASE}${url}`, {
+        method: 'POST',
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
+        body: formData,
+    });
+    if (!res.ok) {
+        const bodyText = await res.text();
+        let detail = 'Request failed';
+        try {
+            const parsed = bodyText ? JSON.parse(bodyText) : {};
+            detail = parsed.detail || bodyText || detail;
+        } catch {
+            detail = bodyText || detail;
+        }
+        throw new Error(detail);
+    }
+    if (res.status === 204) return undefined as T;
+    return res.json();
+}
+
 // Upload with progress tracking via XMLHttpRequest.
 // Returns { promise, abort } — call abort() to cancel the upload.
 // Progress callback: 0-100 = upload phase, 101 = processing phase (server is parsing the file).
@@ -360,6 +382,20 @@ export const fileApi = {
             method: 'POST',
             body: JSON.stringify({ skill_id: skillId }),
         }),
+
+    previewZip: (agentId: string, file: File) => {
+        const formData = new FormData();
+        formData.append('file', file);
+        return postFormData<{ root_folder: string; files: string[]; total: number }>(`/agents/${agentId}/files/preview-zip`, formData);
+    },
+
+    extractZip: (agentId: string, file: File, targetPath: string = '', rootName: string = '') => {
+        const formData = new FormData();
+        formData.append('file', file);
+        formData.append('target_path', targetPath);
+        formData.append('root_name', rootName);
+        return postFormData<{ extracted: number }>(`/agents/${agentId}/files/extract-zip`, formData);
+    },
 
     downloadUrl: (agentId: string, path: string, options?: { inline?: boolean }) => {
         const token = localStorage.getItem('token');

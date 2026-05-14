@@ -19,6 +19,7 @@ import queue
 import uuid
 import unicodedata
 from contextvars import ContextVar
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional, Any
@@ -32,11 +33,10 @@ from app.database import async_session
 from app.models.task import Task
 from app.models.agent import Agent as AgentModel
 from app.models.org import AgentRelationship, OrgMember, AgentAgentRelationship
-from app.models.audit import ChatMessage, AuditLog
+from app.models.audit import ChatMessage
 from app.models.chat_session import ChatSession
 from app.models.channel_config import ChannelConfig
 from app.models.user import User as UserModel
-from app.services.auth_registry import auth_provider_registry
 from app.services.channel_session import find_or_create_channel_session
 from app.services.channel_user_service import get_platform_user_by_org_member
 from app.services.document_conversion import (
@@ -56,17 +56,16 @@ from app.services.workspace_collaboration import (
     read_text_if_exists,
     write_workspace_file,
 )
+from app.services import workspace_tools
 from app.core.permissions import evaluate_agent_relationship_status, evaluate_human_relationship_status
 from app.services.access_relationships import ensure_access_granted_platform_relationships
 from app.config import get_settings
-from app.services import workspace_tools
 from app.services.llm.finish import (
     FINISH_PROTOCOL_REMINDER,
     FINISH_TOOL_DEFINITION,
     FINISH_TOOL_NAME,
-    find_finish_call,
-    parse_tool_arguments,
 )
+
 
 
 _settings = get_settings()
@@ -79,6 +78,55 @@ _tool_config_cache: dict[tuple, tuple[dict, datetime]] = {}
 _TOOL_CONFIG_CACHE_TTL_SECONDS = 60
 
 # Sensitive field keys that should be encrypted/decrypted
+
+@dataclass(frozen=True)
+class FinishCall:
+    """Parsed finish tool call."""
+
+    call_id: str
+    content: str
+    error: str | None = None
+
+    @property
+    def valid(self) -> bool:
+        return self.error is None
+
+
+def parse_tool_arguments(raw_args: Any) -> dict[str, Any]:
+    """Parse OpenAI-style function arguments into a dict."""
+    if raw_args is None or raw_args == "":
+        return {}
+    if isinstance(raw_args, dict):
+        return raw_args
+    if isinstance(raw_args, str):
+        parsed = json.loads(raw_args)
+        return parsed if isinstance(parsed, dict) else {}
+    return {}
+
+
+def find_finish_call(tool_calls: list[dict] | None) -> FinishCall | None:
+    """Return the first valid finish call from a tool call list, if present."""
+    for tc in tool_calls or []:
+        fn = tc.get("function") or {}
+        if (fn.get("name") or "").strip() != FINISH_TOOL_NAME:
+            continue
+        try:
+            args = parse_tool_arguments(fn.get("arguments", "{}"))
+        except json.JSONDecodeError:
+            return FinishCall(
+                call_id=tc.get("id", ""),
+                content="",
+                error="`finish` arguments must be valid JSON with a required string field `content`.",
+            )
+        content = args.get("content")
+        if not isinstance(content, str) or not content.strip():
+            return FinishCall(
+                call_id=tc.get("id", ""),
+                content="",
+                error="`finish` requires a non-empty string field `content`.",
+            )
+        return FinishCall(call_id=tc.get("id", ""), content=content)
+    return None
 SENSITIVE_FIELD_KEYS = {"api_key", "private_key", "auth_code", "password", "secret", "atlassian_api_key"}
 
 def _decrypt_sensitive_fields(config: dict, config_schema: dict | None = None) -> dict:
@@ -1652,186 +1700,6 @@ AGENT_TOOLS = [
             },
         },
     },
-    {
-        "type": "function",
-        "function": {
-            "name": "request_build",
-            "description": "Create a build request for the Software Engineer agent. Any agent or human can use this to request a new website, tool, or application to be built and deployed.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "slug": {
-                        "type": "string",
-                        "description": "URL-friendly project identifier (lowercase, hyphens allowed, 2-50 chars). This becomes the URL path: /workspace/{slug}/",
-                    },
-                    "name": {
-                        "type": "string",
-                        "description": "Human-readable project name",
-                    },
-                    "description": {
-                        "type": "string",
-                        "description": "Detailed description of what to build, including requirements, target audience, and any design preferences",
-                    },
-                },
-                "required": ["slug", "name", "description"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "list_build_requests",
-            "description": "List pending build requests (status=requested) for the Software Engineer agent to pick up.",
-            "parameters": {
-                "type": "object",
-                "properties": {},
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "deploy_static",
-            "description": "Deploy a static website (HTML/CSS/JS) from your workspace to the public workspace. Goes live immediately without approval. The files will be served at /workspace/{slug}/.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "slug": {
-                        "type": "string",
-                        "description": "Project slug (must match an existing build request or be a new unique slug)",
-                    },
-                    "source_dir": {
-                        "type": "string",
-                        "description": "Directory in your workspace containing the built files (e.g., 'workspace/my-project'). Must contain at least an index.html.",
-                    },
-                },
-                "required": ["slug", "source_dir"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "request_container_deploy",
-            "description": "Submit a container-based application for deployment. Requires Frank's approval before going live. The application will be built from a Dockerfile in your workspace.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "slug": {
-                        "type": "string",
-                        "description": "Project slug for the URL path /workspace/{slug}/",
-                    },
-                    "dockerfile_path": {
-                        "type": "string",
-                        "description": "Path to the Dockerfile in your workspace (e.g., 'workspace/my-app/Dockerfile')",
-                    },
-                    "port": {
-                        "type": "integer",
-                        "description": "Port the application listens on inside the container",
-                    },
-                    "name": {
-                        "type": "string",
-                        "description": "Human-readable project name",
-                    },
-                    "description": {
-                        "type": "string",
-                        "description": "What this application does",
-                    },
-                    "resource_limits_suggestion": {
-                        "type": "object",
-                        "description": "Suggested resource limits (optional). Frank will set final limits at approval.",
-                        "properties": {
-                            "memory": {"type": "string", "description": "e.g., '256m', '512m'"},
-                            "cpus": {"type": "string", "description": "e.g., '0.5', '1'"},
-                        },
-                    },
-                },
-                "required": ["slug", "dockerfile_path", "port", "name", "description"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "list_workspace_projects",
-            "description": "List all workspace projects with their current status, deploy type, and URLs.",
-            "parameters": {
-                "type": "object",
-                "properties": {},
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "undeploy_project",
-            "description": "Remove a deployed workspace project. For static sites, deletes files. For containers, stops and removes the container.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "slug": {
-                        "type": "string",
-                        "description": "The project slug to undeploy",
-                    },
-                },
-                "required": ["slug"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "get_bug_reports",
-            "description": "List open bug reports for workspace projects. Use this to find issues that need fixing.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "status_filter": {
-                        "type": "string",
-                        "description": "Filter by status: 'open', 'investigating', 'escalated', or 'all'. Default: 'open'",
-                    },
-                },
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "resolve_bug",
-            "description": "Mark a bug report as fixed after you have redeployed the fix.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "bug_report_id": {
-                        "type": "string",
-                        "description": "The UUID of the bug report to resolve",
-                    },
-                },
-                "required": ["bug_report_id"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "report_workspace_bug",
-            "description": "Report a bug on a deployed workspace project. Creates a bug report for the Software Engineer agent to investigate and fix.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "slug": {
-                        "type": "string",
-                        "description": "The project slug with the bug",
-                    },
-                    "description": {
-                        "type": "string",
-                        "description": "Detailed description of the bug, including steps to reproduce if possible",
-                    },
-                },
-                "required": ["slug", "description"],
-            },
-        },
-    },
     # --- Skill Management ---
     {
         "type": "function",
@@ -2088,6 +1956,186 @@ AGENT_TOOLS = [
 # Note: send_channel_message is intentionally NOT here — it lives in
 # _CHANNEL_MESSAGE_TOOL_NAMES and is only added when a channel is configured,
 # to avoid sending duplicate tool definitions to the LLM.
+
+WORKSPACE_AGENT_TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "request_build",
+            "description": "Create a build request for the Software Engineer agent. Any agent or human can use this to request a new website, tool, or application to be built and deployed.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "slug": {
+                        "type": "string",
+                        "description": "URL-friendly project identifier (lowercase, hyphens allowed, 2-50 chars). This becomes the URL path: /workspace/{slug}/",
+                    },
+                    "name": {
+                        "type": "string",
+                        "description": "Human-readable project name",
+                    },
+                    "description": {
+                        "type": "string",
+                        "description": "Detailed description of what to build, including requirements, target audience, and any design preferences",
+                    },
+                },
+                "required": ["slug", "name", "description"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_build_requests",
+            "description": "List pending build requests (status=requested) for the Software Engineer agent to pick up.",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "deploy_static",
+            "description": "Deploy a static website (HTML/CSS/JS) from your workspace to the public workspace. Goes live immediately without approval. The files will be served at /workspace/{slug}/.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "slug": {
+                        "type": "string",
+                        "description": "Project slug (must match an existing build request or be a new unique slug)",
+                    },
+                    "source_dir": {
+                        "type": "string",
+                        "description": "Directory in your workspace containing the built files (e.g., 'workspace/my-project'). Must contain at least an index.html.",
+                    },
+                },
+                "required": ["slug", "source_dir"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "request_container_deploy",
+            "description": "Submit a container-based application for deployment. Requires Frank's approval before going live. The application will be built from a Dockerfile in your workspace.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "slug": {
+                        "type": "string",
+                        "description": "Project slug for the URL path /workspace/{slug}/",
+                    },
+                    "dockerfile_path": {
+                        "type": "string",
+                        "description": "Path to the Dockerfile in your workspace (e.g., 'workspace/my-app/Dockerfile')",
+                    },
+                    "port": {
+                        "type": "integer",
+                        "description": "Port the application listens on inside the container",
+                    },
+                    "name": {
+                        "type": "string",
+                        "description": "Human-readable project name",
+                    },
+                    "description": {
+                        "type": "string",
+                        "description": "What this application does",
+                    },
+                    "resource_limits_suggestion": {
+                        "type": "object",
+                        "description": "Suggested resource limits (optional). Frank will set final limits at approval.",
+                        "properties": {
+                            "memory": {"type": "string", "description": "e.g., '256m', '512m'"},
+                            "cpus": {"type": "string", "description": "e.g., '0.5', '1'"},
+                        },
+                    },
+                },
+                "required": ["slug", "dockerfile_path", "port", "name", "description"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_workspace_projects",
+            "description": "List all workspace projects with their current status, deploy type, and URLs.",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "undeploy_project",
+            "description": "Remove a deployed workspace project. For static sites, deletes files. For containers, stops and removes the container.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "slug": {"type": "string", "description": "The project slug to undeploy"},
+                },
+                "required": ["slug"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_bug_reports",
+            "description": "List open bug reports for workspace projects. Use this to find issues that need fixing.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "status_filter": {
+                        "type": "string",
+                        "description": "Filter by status: 'open', 'investigating', 'escalated', or 'all'. Default: 'open'",
+                    },
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "resolve_bug",
+            "description": "Mark a bug report as fixed after you have redeployed the fix.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "bug_report_id": {
+                        "type": "string",
+                        "description": "The UUID of the bug report to resolve",
+                    },
+                },
+                "required": ["bug_report_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "report_workspace_bug",
+            "description": "Report a bug on a deployed workspace project. Creates a bug report for the Software Engineer agent to investigate and fix.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "slug": {
+                        "type": "string",
+                        "description": "The project slug with the bug",
+                    },
+                    "description": {
+                        "type": "string",
+                        "description": "Detailed description of the bug, including steps to reproduce if possible",
+                    },
+                },
+                "required": ["slug", "description"],
+            },
+        },
+    },
+]
+
+AGENT_TOOLS = [
+    *AGENT_TOOLS,
+    *WORKSPACE_AGENT_TOOLS,
+]
+
 _ALWAYS_INCLUDE_CORE = {
     "complete_focus_item",
     FINISH_TOOL_NAME,
@@ -2247,7 +2295,7 @@ async def _agent_has_feishu(agent_id: uuid.UUID) -> bool:
                 select(ChannelConfig).where(
                     ChannelConfig.agent_id == agent_id,
                     ChannelConfig.channel_type == "feishu",
-                    ChannelConfig.is_configured == True,
+                    ChannelConfig.is_configured,
                 )
             )
             return r.scalar_one_or_none() is not None
@@ -2263,7 +2311,23 @@ async def _agent_has_any_channel(agent_id: uuid.UUID) -> bool:
             r = await db.execute(
                 select(ChannelConfig).where(
                     ChannelConfig.agent_id == agent_id,
-                    ChannelConfig.is_configured == True,
+                    ChannelConfig.is_configured,
+                )
+            )
+            return r.scalar_one_or_none() is not None
+    except Exception:
+        return False
+
+
+async def _agent_has_any_channel(agent_id: uuid.UUID) -> bool:
+    """Check if agent has any configured channel (Feishu/DingTalk/WeCom)."""
+    try:
+        from app.models.channel_config import ChannelConfig
+        async with async_session() as db:
+            r = await db.execute(
+                select(ChannelConfig).where(
+                    ChannelConfig.agent_id == agent_id,
+                    ChannelConfig.is_configured,
                 )
             )
             return r.scalar_one_or_none() is not None
@@ -2364,7 +2428,7 @@ async def get_agent_tools_for_llm(agent_id: uuid.UUID) -> list[dict]:
 
             # Get all tools visible within this agent's tenant boundary.
             all_tools_r = await db.execute(
-                select(Tool).where(Tool.enabled == True, or_(*visible_clauses))
+                select(Tool).where(Tool.enabled, or_(*visible_clauses))
             )
             all_tools = all_tools_r.scalars().all()
 
@@ -3001,6 +3065,24 @@ async def execute_tool(
             result = await _generate_image(agent_id, ws, arguments, "custom")
         elif tool_name == "discover_resources":
             result = await _discover_resources(agent_id, arguments)
+        elif tool_name == "request_build":
+            result = await workspace_tools.tool_request_build(agent_id, arguments)
+        elif tool_name == "list_build_requests":
+            result = await workspace_tools.tool_list_build_requests()
+        elif tool_name == "deploy_static":
+            result = await workspace_tools.tool_deploy_static(agent_id, ws, arguments)
+        elif tool_name == "request_container_deploy":
+            result = await workspace_tools.tool_request_container_deploy(agent_id, ws, arguments)
+        elif tool_name == "list_workspace_projects":
+            result = await workspace_tools.tool_list_workspace_projects()
+        elif tool_name == "undeploy_project":
+            result = await workspace_tools.tool_undeploy_project(arguments)
+        elif tool_name == "get_bug_reports":
+            result = await workspace_tools.tool_get_bug_reports(arguments)
+        elif tool_name == "resolve_bug":
+            result = await workspace_tools.tool_resolve_bug(arguments)
+        elif tool_name == "report_workspace_bug":
+            result = await workspace_tools.tool_report_workspace_bug(agent_id, arguments)
         elif tool_name == "import_mcp_server":
             result = await _import_mcp_server(agent_id, arguments)
         # ── Feishu Bitable Tools ──
@@ -3058,24 +3140,6 @@ async def execute_tool(
             result = await _publish_page(agent_id, user_id, ws, arguments)
         elif tool_name == "list_published_pages":
             result = await _list_published_pages(agent_id)
-        elif tool_name == "request_build":
-            result = await workspace_tools.tool_request_build(agent_id, arguments)
-        elif tool_name == "list_build_requests":
-            result = await workspace_tools.tool_list_build_requests(agent_id)
-        elif tool_name == "deploy_static":
-            result = await workspace_tools.tool_deploy_static(agent_id, ws, arguments)
-        elif tool_name == "request_container_deploy":
-            result = await workspace_tools.tool_request_container_deploy(agent_id, ws, arguments)
-        elif tool_name == "list_workspace_projects":
-            result = await workspace_tools.tool_list_workspace_projects(agent_id)
-        elif tool_name == "undeploy_project":
-            result = await workspace_tools.tool_undeploy_project(arguments, agent_id)
-        elif tool_name == "get_bug_reports":
-            result = await workspace_tools.tool_get_bug_reports(arguments, agent_id)
-        elif tool_name == "resolve_bug":
-            result = await workspace_tools.tool_resolve_bug(arguments, agent_id)
-        elif tool_name == "report_workspace_bug":
-            result = await workspace_tools.tool_report_workspace_bug(agent_id, arguments)
         # ── AgentBay Tools ──
         elif tool_name == "agentbay_browser_navigate":
             result = await _agentbay_browser_navigate(agent_id, ws, arguments)
@@ -3204,8 +3268,6 @@ async def _web_search(arguments: dict, agent_id: uuid.UUID | None = None) -> str
 
     Config resolution priority: Agent config > Company config > Defaults.
     """
-    import httpx
-    import re
 
     query = arguments.get("query", "")
     if not query:
@@ -3236,7 +3298,8 @@ async def _web_search(arguments: dict, agent_id: uuid.UUID | None = None) -> str
 
 async def _search_duckduckgo(query: str, max_results: int) -> str:
     """Search via DuckDuckGo HTML (free, no API key)."""
-    import httpx, re
+    import httpx
+    import re
 
     async with httpx.AsyncClient(follow_redirects=True) as client:
         resp = await client.get(
@@ -3333,7 +3396,6 @@ async def _jina_search(arguments: dict) -> str:
 async def _jina_read(arguments: dict) -> str:
     """Read web page via Jina AI Reader API (r.jina.ai). Returns clean structured markdown."""
     import httpx
-    from app.config import get_settings
 
     url = arguments.get("url", "").strip()
     if not url:
@@ -5461,6 +5523,44 @@ async def _send_feishu_message(agent_id: uuid.UUID, args: dict) -> str:
             config = config_result.scalar_one_or_none()
             if not config:
                 return "❌ This agent has no Feishu channel configured"
+
+            async def _save_outgoing_to_feishu_session(feishu_user_id: str, org_member, title_name: str):
+                """Save the outgoing message to the Feishu P2P chat session."""
+                try:
+                    from datetime import datetime as _dt, timezone as _tz
+
+                    agent_r = await db.execute(select(AgentModel).where(AgentModel.id == agent_id))
+                    agent_obj = agent_r.scalar_one_or_none()
+
+                    platform_user = await get_platform_user_by_org_member(
+                        db=db,
+                        org_member=org_member,
+                        agent_tenant_id=agent_obj.tenant_id if agent_obj else None,
+                    )
+                    user_id = platform_user.id
+
+                    ext_conv_id = f"feishu_p2p_{feishu_user_id}"
+                    sess = await find_or_create_channel_session(
+                        db=db,
+                        agent_id=agent_id,
+                        user_id=user_id,
+                        external_conv_id=ext_conv_id,
+                        source_channel="feishu",
+                        first_message_title=f"[Agent → {title_name or feishu_user_id}]",
+                    )
+                    db.add(ChatMessage(
+                        agent_id=agent_id,
+                        user_id=user_id,
+                        role="assistant",
+                        content=message_text,
+                        conversation_id=str(sess.id),
+                    ))
+                    sess.last_message_at = _dt.now(_tz.utc)
+                    await db.commit()
+                    logger.info(f"[Feishu] Saved outgoing message to session {sess.id} (user_id: {feishu_user_id})")
+                except Exception as e:
+                    logger.error(f"[Feishu] Failed to save outgoing message to history: {e}")
+
             if direct_user_id and not member_name:
                 rel_result = await db.execute(
                     select(AgentRelationship)
@@ -5487,7 +5587,11 @@ async def _send_feishu_message(agent_id: uuid.UUID, args: dict) -> str:
                     )
                     if resp.get("code") == 0:
                         # Save to history session
-                        await _save_outgoing_to_feishu_session(direct_user_id)
+                        await _save_outgoing_to_feishu_session(
+                            direct_user_id,
+                            direct_rel.member if direct_rel else None,
+                            direct_rel.member.name if direct_rel and direct_rel.member else direct_user_id,
+                        )
                         return f"✅ 消息已发送（user_id: {direct_user_id}）"
                     return f"❌ 发送失败：{resp.get('msg')} (code {resp.get('code')})"
                 except FeishuAPIError as user_id_err:
@@ -5527,50 +5631,14 @@ async def _send_feishu_message(agent_id: uuid.UUID, args: dict) -> str:
                     content=content, receive_id_type=id_type,
                 )
 
-            async def _save_outgoing_to_feishu_session(feishu_user_id: str):
-                """Save the outgoing message to the Feishu P2P chat session."""
-                try:
-                    from datetime import datetime as _dt, timezone as _tz
-
-
-                    agent_r = await db.execute(select(AgentModel).where(AgentModel.id == agent_id))
-                    agent_obj = agent_r.scalar_one_or_none()
-                    creator_id = agent_obj.creator_id if agent_obj else agent_id
-
-                    # Get or create platform user from OrgMember (unified logic)
-                    platform_user = await get_platform_user_by_org_member(
-                        db=db,
-                        org_member=target_member,
-                        agent_tenant_id=agent_obj.tenant_id if agent_obj else None,
-                    )
-                    user_id = platform_user.id
-
-                    ext_conv_id = f"feishu_p2p_{feishu_user_id}"
-                    sess = await find_or_create_channel_session(
-                        db=db,
-                        agent_id=agent_id,
-                        user_id=user_id,
-                        external_conv_id=ext_conv_id,
-                        source_channel="feishu",
-                        first_message_title=f"[Agent → {member_name or feishu_user_id}]",
-                    )
-                    db.add(ChatMessage(
-                        agent_id=agent_id,
-                        user_id=user_id,
-                        role="assistant",
-                        content=message_text,
-                        conversation_id=str(sess.id),
-                    ))
-                    sess.last_message_at = _dt.now(_tz.utc)
-                    await db.commit()
-                    logger.info(f"[Feishu] Saved outgoing message to session {sess.id} (user_id: {feishu_user_id})")
-                except Exception as e:
-                    logger.error(f"[Feishu] Failed to save outgoing message to history: {e}")
-
             try:
                 resp = await _try_send(config.app_id, config.app_secret, target_member.external_id, "user_id")
                 if resp.get("code") == 0:
-                    await _save_outgoing_to_feishu_session(target_member.external_id)
+                    await _save_outgoing_to_feishu_session(
+                        target_member.external_id,
+                        target_member,
+                        member_name or target_member.external_id,
+                    )
                     return f"✅ Successfully sent message to {member_name}"
                 logger.info(f"❌ Failed to send message to {target_member.external_id} via Feishu (user_id): {resp}")
                 return f"发送失败: {resp.get('msg')} (code {resp.get('code')})"
@@ -5731,7 +5799,7 @@ async def _send_dingtalk_message(
                 select(ChannelConfig).where(
                     ChannelConfig.agent_id == agent_id,
                     ChannelConfig.channel_type == "dingtalk",
-                    ChannelConfig.is_configured == True,
+                    ChannelConfig.is_configured,
                 )
             )
             config = config_result.scalar_one_or_none()
@@ -5827,7 +5895,7 @@ async def _send_wecom_message(
                 select(ChannelConfig).where(
                     ChannelConfig.agent_id == agent_id,
                     ChannelConfig.channel_type == "wecom",
-                    ChannelConfig.is_configured == True,
+                    ChannelConfig.is_configured,
                 )
             )
             config = config_result.scalar_one_or_none()
@@ -5916,7 +5984,7 @@ async def _send_slack_message(
                 select(ChannelConfig).where(
                     ChannelConfig.agent_id == agent_id,
                     ChannelConfig.channel_type == "slack",
-                    ChannelConfig.is_configured == True,
+                    ChannelConfig.is_configured,
                 )
             )
             config = config_result.scalar_one_or_none()
@@ -5999,7 +6067,7 @@ async def _send_teams_channel_message(
                 select(ChannelConfig).where(
                     ChannelConfig.agent_id == agent_id,
                     ChannelConfig.channel_type == "microsoft_teams",
-                    ChannelConfig.is_configured == True,
+                    ChannelConfig.is_configured,
                 )
             )
             config = config_result.scalar_one_or_none()
@@ -6024,7 +6092,7 @@ async def _send_teams_channel_message(
                     ChatSession.agent_id == agent_id,
                     ChatSession.user_id == platform_user.id,
                     ChatSession.source_channel == "microsoft_teams",
-                    ChatSession.is_group == False,
+                    ChatSession.is_group.is_(False),
                 )
                 .order_by(ChatSession.last_message_at.desc(), ChatSession.created_at.desc())
                 .limit(1)
@@ -6079,7 +6147,7 @@ async def _send_wechat_channel_message(
                 select(ChannelConfig).where(
                     ChannelConfig.agent_id == agent_id,
                     ChannelConfig.channel_type == "wechat",
-                    ChannelConfig.is_configured == True,
+                    ChannelConfig.is_configured,
                 )
             )
             config = config_result.scalar_one_or_none()
@@ -6519,11 +6587,12 @@ async def _create_on_message_trigger(
     """Programmatically create an on_message trigger for an agent."""
     from app.models.trigger import AgentTrigger
 
-    focus_ref = await ensure_focus_item(
-        agent_id,
-        focus_ref=focus_ref,
-        description=reason or trigger_name,
-    )
+    if not focus_ref:
+        focus_ref = await ensure_focus_item(
+            agent_id,
+            focus_ref=focus_ref,
+            description=reason or trigger_name,
+        )
 
     config: dict = {"from_agent_name": from_agent_name}
     if notification_summary:
@@ -6592,6 +6661,18 @@ async def _append_focus_item(agent_id: uuid.UUID, identifier: str, description: 
         await ensure_focus_item(agent_id, focus_ref=identifier, description=description)
     except Exception as e:
         logger.warning(f"[A2A] Failed to update Focus for agent {agent_id}: {e}")
+
+    try:
+        focus_path = WORKSPACE_ROOT / str(agent_id) / "focus.md"
+        focus_path.parent.mkdir(parents=True, exist_ok=True)
+        content = focus_path.read_text(encoding="utf-8") if focus_path.exists() else "# Focus\n\n"
+        if identifier not in content:
+            if not content.endswith("\n"):
+                content += "\n"
+            content += f"- [ ] {identifier}: {description}\n"
+            focus_path.write_text(content, encoding="utf-8")
+    except Exception as e:
+        logger.warning(f"[A2A] Failed to mirror legacy focus file for agent {agent_id}: {e}")
 
 
 async def _wake_agent_async(agent_id: uuid.UUID, reason_context: str, *, from_agent_id: uuid.UUID | None = None, skip_dedup: bool = False, a2a_session_id: str | None = None) -> None:
@@ -7402,7 +7483,6 @@ async def _plaza_add_comment(agent_id: uuid.UUID, arguments: dict) -> str:
                 mentions = re.findall(r'@(\S+)', content)
                 if mentions:
                     from app.services.notification_service import send_notification
-                    from app.models.user import User
                     # Load agents in tenant
                     a_q = select(AgentModel).where(AgentModel.id != agent_id)
                     if agent.tenant_id:
@@ -7831,7 +7911,7 @@ async def _handle_set_trigger(
             result = await db.execute(
                 select(sa_func.count()).select_from(AgentTrigger).where(
                     AgentTrigger.agent_id == agent_id,
-                    AgentTrigger.is_enabled == True,
+                    AgentTrigger.is_enabled,
                 )
             )
             count = result.scalar() or 0
@@ -7932,7 +8012,7 @@ async def _handle_update_trigger(agent_id: uuid.UUID, arguments: dict) -> str:
                 changes.append(f"config: {old_config} → {new_config}")
             if new_reason is not None:
                 trigger.reason = new_reason
-                changes.append(f"reason updated")
+                changes.append("reason updated")
 
             await db.commit()
 
@@ -8038,12 +8118,11 @@ async def _upload_image(agent_id: uuid.UUID, ws: Path, arguments: dict) -> str:
 
     # ── Load ImageKit credentials (Agent > Company priority) ──
     private_key = ""
-    url_endpoint = ""
     try:
         # Use standard _get_tool_config (Agent > Company, cached, schema-aware decryption)
         config = await _get_tool_config(agent_id, "upload_image") or {}
         private_key = config.get("private_key", "")
-        url_endpoint = config.get("url_endpoint", "")
+        config.get("url_endpoint", "")
     except Exception as e:
         logger.error(f"[UploadImage] Config load error: {e}")
 
@@ -8689,7 +8768,7 @@ async def _get_feishu_token(agent_id: uuid.UUID) -> tuple[str, str] | None:
             select(ChannelConfig).where(
                 ChannelConfig.agent_id == agent_id,
                 ChannelConfig.channel_type == "feishu",
-                ChannelConfig.is_configured == True,
+                ChannelConfig.is_configured,
             )
         )
         config = result.scalar_one_or_none()
@@ -8890,7 +8969,7 @@ def _parse_feishu_url(url: str) -> dict:
         result['table_id'] = table_match.group(1)
     
     # support URL with /tblxxxxxx
-    if not 'table_id' in result:
+    if 'table_id' not in result:
         tbl_match = re.search(r'/(tbl[a-zA-Z0-9_]+)', url)
         if tbl_match:
             result['table_id'] = tbl_match.group(1)
@@ -9106,7 +9185,7 @@ async def _bitable_query_records(agent_id: uuid.UUID, arguments: dict) -> str:
         elif isinstance(filter_info, str) and filter_info.strip():
             try:
                 filters_dict = json.loads(filter_info)
-            except:
+            except Exception:
                 pass 
                 
         resp = await feishu_service.bitable_query_records(app_id, app_secret, app_token, table_id, filters_dict)
@@ -9460,7 +9539,7 @@ async def _feishu_wiki_list(agent_id: uuid.UUID, arguments: dict) -> str:
 
     space_id = node_info["space_id"]
     if not space_id:
-        return f"❌ 无法获取知识库 space_id，请检查 token 是否正确。"
+        return "❌ 无法获取知识库 space_id，请检查 token 是否正确。"
 
     async def _list_children(parent_token: str, depth: int) -> list[dict]:
         """Return flat list of {title, node_token, obj_token, has_child, depth}."""
@@ -10056,8 +10135,8 @@ async def _feishu_drive_share(agent_id: uuid.UUID, arguments: dict) -> str:
                         # Feishu platform policy: you cannot add yourself as a collaborator via API.
                         # Permissions must be granted by others, or set manually in the UI.
                         results.append(
-                            f"⚠️ 飞书平台安全限制：无法通过 API 为自己添加协作权限。\n"
-                            f"请手动操作：打开文档 → 右上角「分享」→ 添加自己并设置权限。"
+                            "⚠️ 飞书平台安全限制：无法通过 API 为自己添加协作权限。\n"
+                            "请手动操作：打开文档 → 右上角「分享」→ 添加自己并设置权限。"
                         )
                     elif _c in (99991672, 99991668):
                         return (
@@ -10167,7 +10246,7 @@ async def _feishu_drive_delete(agent_id: uuid.UUID, arguments: dict) -> str:
         elif code == 1061007:
             return f"❌ 文件 `{file_token}` 已被删除。"
         elif code == 1061045:
-            return f"⚠️ 接口频率限制，请稍后重试。（每秒最多 5 次）"
+            return "⚠️ 接口频率限制，请稍后重试。（每秒最多 5 次）"
         else:
             return f"❌ 删除{type_label}失败：{msg} (code {code})"
 
@@ -10268,7 +10347,7 @@ async def _feishu_calendar_list(agent_id: uuid.UUID, arguments: dict) -> str:
                             busy_lines.append(f"  🔴 {s}–{e}")
                         except Exception:
                             busy_lines.append(f"  🔴 {slot.get('start_time')}–{slot.get('end_time')}")
-                    freebusy_section = f"\n📌 **用户真实日历（忙碌时段）**：\n" + "\n".join(busy_lines)
+                    freebusy_section = "\n📌 **用户真实日历（忙碌时段）**：\n" + "\n".join(busy_lines)
                 else:
                     freebusy_section = "\n📌 **用户真实日历**：该时段全部空闲。"
         except Exception as _fe:
@@ -10613,7 +10692,6 @@ async def _feishu_user_search(agent_id: uuid.UUID, arguments: dict) -> str:
     2. Fall back to Contact v3 GET /users/{open_id} if we find a match by email.
     The cache is populated by feishu.py each time a message sender is resolved.
     """
-    import httpx
     import json as _json
     import pathlib as _pl
 
@@ -10625,7 +10703,7 @@ async def _feishu_user_search(agent_id: uuid.UUID, arguments: dict) -> str:
     if not app_id or not app_secret:
         return "❌ Agent has no Feishu channel configured."
     from app.services.feishu_service import feishu_service
-    token = await feishu_service.get_tenant_access_token(app_id, app_secret)
+    await feishu_service.get_tenant_access_token(app_id, app_secret)
 
     # ── Load local contacts cache ─────────────────────────────────────────────
     _cache_file = _pl.Path(f"/data/workspaces/{agent_id}/feishu_contacts_cache.json")
@@ -11068,7 +11146,7 @@ async def _agentbay_browser_click(agent_id: Optional[uuid.UUID], ws: Path, argum
     except RuntimeError as e:
         return f"❌ {str(e)}"
     except Exception as e:
-        logger.exception(f"[AgentBay] Browser click failed")
+        logger.exception("[AgentBay] Browser click failed")
         return f"❌ 点击失败: {str(e)[:200]}"
 
 
@@ -11090,7 +11168,7 @@ async def _agentbay_browser_type(agent_id: Optional[uuid.UUID], ws: Path, argume
     except RuntimeError as e:
         return f"❌ {str(e)}"
     except Exception as e:
-        logger.exception(f"[AgentBay] Browser type failed")
+        logger.exception("[AgentBay] Browser type failed")
         return f"❌ 输入失败: {str(e)[:200]}"
 
 
@@ -11999,7 +12077,7 @@ async def _agentbay_computer_click(agent_id: Optional[uuid.UUID], ws: Path, argu
     except RuntimeError as e:
         return f"{str(e)}"
     except Exception as e:
-        logger.exception(f"[AgentBay] Computer click failed")
+        logger.exception("[AgentBay] Computer click failed")
         return f"Click failed: {str(e)[:200]}"
 
 
@@ -12020,11 +12098,11 @@ async def _agentbay_computer_input_text(agent_id: Optional[uuid.UUID], ws: Path,
         result = await client.computer_input_text(text)
         if result.get("success"):
             return f"Typed text: {text[:100]}"
-        return f"Text input failed"
+        return "Text input failed"
     except RuntimeError as e:
         return f"{str(e)}"
     except Exception as e:
-        logger.exception(f"[AgentBay] Computer input_text failed")
+        logger.exception("[AgentBay] Computer input_text failed")
         return f"Text input failed: {str(e)[:200]}"
 
 
@@ -12052,7 +12130,7 @@ async def _agentbay_computer_press_keys(agent_id: Optional[uuid.UUID], ws: Path,
     except RuntimeError as e:
         return f"{str(e)}"
     except Exception as e:
-        logger.exception(f"[AgentBay] Computer press_keys failed")
+        logger.exception("[AgentBay] Computer press_keys failed")
         return f"Key press failed: {str(e)[:200]}"
 
 
@@ -12074,11 +12152,11 @@ async def _agentbay_computer_scroll(agent_id: Optional[uuid.UUID], ws: Path, arg
         result = await client.computer_scroll(x, y, direction=direction, amount=amount)
         if result.get("success"):
             return f"Scrolled {direction} by {amount} step(s) at ({x}, {y})"
-        return f"Scroll failed"
+        return "Scroll failed"
     except RuntimeError as e:
         return f"{str(e)}"
     except Exception as e:
-        logger.exception(f"[AgentBay] Computer scroll failed")
+        logger.exception("[AgentBay] Computer scroll failed")
         return f"Scroll failed: {str(e)[:200]}"
 
 
@@ -12098,11 +12176,11 @@ async def _agentbay_computer_move_mouse(agent_id: Optional[uuid.UUID], ws: Path,
         result = await client.computer_move_mouse(x, y)
         if result.get("success"):
             return f"Mouse moved to ({x}, {y})"
-        return f"Mouse move failed"
+        return "Mouse move failed"
     except RuntimeError as e:
         return f"{str(e)}"
     except Exception as e:
-        logger.exception(f"[AgentBay] Computer move_mouse failed")
+        logger.exception("[AgentBay] Computer move_mouse failed")
         return f"Mouse move failed: {str(e)[:200]}"
 
 
@@ -12125,11 +12203,11 @@ async def _agentbay_computer_drag_mouse(agent_id: Optional[uuid.UUID], ws: Path,
         result = await client.computer_drag_mouse(from_x, from_y, to_x, to_y, button=button)
         if result.get("success"):
             return f"Dragged from ({from_x}, {from_y}) to ({to_x}, {to_y})"
-        return f"Drag failed"
+        return "Drag failed"
     except RuntimeError as e:
         return f"{str(e)}"
     except Exception as e:
-        logger.exception(f"[AgentBay] Computer drag_mouse failed")
+        logger.exception("[AgentBay] Computer drag_mouse failed")
         return f"Drag failed: {str(e)[:200]}"
 
 
@@ -12153,7 +12231,7 @@ async def _agentbay_computer_get_screen_size(agent_id: Optional[uuid.UUID], ws: 
     except RuntimeError as e:
         return f"{str(e)}"
     except Exception as e:
-        logger.exception(f"[AgentBay] Computer get_screen_size failed")
+        logger.exception("[AgentBay] Computer get_screen_size failed")
         return f"Get screen size failed: {str(e)[:200]}"
 
 
@@ -12250,7 +12328,7 @@ async def _agentbay_computer_start_app(agent_id: Optional[uuid.UUID], ws: Path, 
     except RuntimeError as e:
         return f"{str(e)}"
     except Exception as e:
-        logger.exception(f"[AgentBay] Computer start_app failed")
+        logger.exception("[AgentBay] Computer start_app failed")
         return f"Start application failed: {str(e)[:200]}"
 
 
@@ -12286,7 +12364,7 @@ async def _agentbay_computer_get_installed_apps(agent_id: Optional[uuid.UUID], w
     except RuntimeError as e:
         return f"{str(e)}"
     except Exception as e:
-        logger.exception(f"[AgentBay] Computer get_installed_apps failed")
+        logger.exception("[AgentBay] Computer get_installed_apps failed")
         return f"Get installed applications failed: {str(e)[:200]}"
 
 
@@ -12310,7 +12388,7 @@ async def _agentbay_computer_get_cursor_position(agent_id: Optional[uuid.UUID], 
     except RuntimeError as e:
         return f"{str(e)}"
     except Exception as e:
-        logger.exception(f"[AgentBay] Computer get_cursor_position failed")
+        logger.exception("[AgentBay] Computer get_cursor_position failed")
         return f"Get cursor position failed: {str(e)[:200]}"
 
 
@@ -12334,7 +12412,7 @@ async def _agentbay_computer_get_active_window(agent_id: Optional[uuid.UUID], ws
     except RuntimeError as e:
         return f"{str(e)}"
     except Exception as e:
-        logger.exception(f"[AgentBay] Computer get_active_window failed")
+        logger.exception("[AgentBay] Computer get_active_window failed")
         return f"Get active window failed: {str(e)[:200]}"
 
 
@@ -12359,7 +12437,7 @@ async def _agentbay_computer_activate_window(agent_id: Optional[uuid.UUID], ws: 
     except RuntimeError as e:
         return f"{str(e)}"
     except Exception as e:
-        logger.exception(f"[AgentBay] Computer activate_window failed")
+        logger.exception("[AgentBay] Computer activate_window failed")
         return f"Activate window failed: {str(e)[:200]}"
 
 
@@ -12394,7 +12472,7 @@ async def _agentbay_computer_list_windows(agent_id: Optional[uuid.UUID], ws: Pat
     except RuntimeError as e:
         return f"{str(e)}"
     except Exception as e:
-        logger.exception(f"[AgentBay] Computer list_windows failed")
+        logger.exception("[AgentBay] Computer list_windows failed")
         return f"List windows failed: {str(e)[:200]}"
 
 
@@ -12458,7 +12536,7 @@ async def _agentbay_computer_close_window(agent_id: Optional[uuid.UUID], ws: Pat
         except RuntimeError as e:
             return f"{str(e)}"
         except Exception as e:
-            logger.exception(f"[AgentBay] Computer close_window candidate lookup failed")
+            logger.exception("[AgentBay] Computer close_window candidate lookup failed")
             return f"Close window requires window_id. Candidate lookup failed: {str(e)[:200]}"
 
     try:
@@ -12474,7 +12552,7 @@ async def _agentbay_computer_close_window(agent_id: Optional[uuid.UUID], ws: Pat
     except RuntimeError as e:
         return f"{str(e)}"
     except Exception as e:
-        logger.exception(f"[AgentBay] Computer close_window failed")
+        logger.exception("[AgentBay] Computer close_window failed")
         return f"Close window failed: {str(e)[:200]}"
 
 
@@ -12520,7 +12598,7 @@ async def _agentbay_computer_dismiss_dialog(agent_id: Optional[uuid.UUID], ws: P
     except RuntimeError as e:
         return f"{str(e)}"
     except Exception as e:
-        logger.exception(f"[AgentBay] Computer dismiss_dialog failed")
+        logger.exception("[AgentBay] Computer dismiss_dialog failed")
         return f"Dismiss dialog failed: {str(e)[:200]}"
 
 
@@ -12546,7 +12624,7 @@ async def _agentbay_computer_list_visible_apps(agent_id: Optional[uuid.UUID], ws
     except RuntimeError as e:
         return f"{str(e)}"
     except Exception as e:
-        logger.exception(f"[AgentBay] Computer list_visible_apps failed")
+        logger.exception("[AgentBay] Computer list_visible_apps failed")
         return f"List applications failed: {str(e)[:200]}"
 
 
@@ -12744,8 +12822,6 @@ async def _get_okr(agent_id: uuid.UUID | None, arguments: dict) -> str:
     Includes company-level O+KR and every member's individual O+KR.
     This is a read-only tool available to all agents.
     """
-    import json
-    import httpx
 
     # Resolve tenant_id from the calling agent
     if not agent_id:
@@ -12758,7 +12834,7 @@ async def _get_okr(agent_id: uuid.UUID | None, arguments: dict) -> str:
         from app.models.org import OrgMember
         from app.models.user import User
         from sqlalchemy import select as _select
-        from datetime import date, timedelta
+        from datetime import date
 
         async with async_session() as db:
             # Look up the agent's tenant
@@ -12924,7 +13000,6 @@ async def _get_my_okr(agent_id: uuid.UUID | None, arguments: dict) -> str:
         from app.models.agent import Agent
         from app.models.okr import OKRObjective, OKRKeyResult, OKRSettings
         from sqlalchemy import select as _select
-        from datetime import date, timedelta
 
         async with async_session() as db:
             agent_result = await db.execute(_select(Agent).where(Agent.id == agent_id))
@@ -13473,7 +13548,7 @@ async def _create_objective(agent_id: uuid.UUID | None, user_id: uuid.UUID | Non
             owner_info = f"owner={owner_name_hint or owner_id_str or 'unattributed'}"
             return f"Successfully created Objective '{obj.title}' (ID: {obj.id}, {owner_info})"
     except Exception as e:
-        logger.exception(f"[OKR] create_objective failed")
+        logger.exception("[OKR] create_objective failed")
         return f"Failed to create objective: {str(e)[:200]}"
 
 
@@ -13522,7 +13597,7 @@ async def _create_key_result(agent_id: uuid.UUID | None, user_id: uuid.UUID | No
             await db.commit()
             return f"Successfully created Key Result '{kr.title}' (ID: {kr.id})"
     except Exception as e:
-        logger.exception(f"[OKR] create_key_result failed")
+        logger.exception("[OKR] create_key_result failed")
         return f"Failed to create key result: {str(e)[:200]}"
 
 
@@ -13590,7 +13665,7 @@ async def _update_objective(agent_id: uuid.UUID | None, user_id: uuid.UUID | Non
             await db.commit()
             return f"Successfully updated Objective {obj.id}. Changed fields: {', '.join(updates)}"
     except Exception as e:
-        logger.exception(f"[OKR] update_objective failed")
+        logger.exception("[OKR] update_objective failed")
         return f"Failed to update objective: {str(e)[:200]}"
 
 
@@ -13665,7 +13740,7 @@ async def _update_any_kr_progress(agent_id: uuid.UUID | None, user_id: uuid.UUID
 
             return f"Successfully updated KR '{kr.title}'. Progress: {old_val} -> {kr.current_value} {kr.unit or ''}. Status: {kr.status}"
     except Exception as e:
-        logger.exception(f"[OKR] update_any_kr_progress failed")
+        logger.exception("[OKR] update_any_kr_progress failed")
         return f"Failed to update kr progress: {str(e)[:200]}"
 
 

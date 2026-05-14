@@ -331,7 +331,7 @@ class WeChatPollManager:
             result = await db.execute(
                 select(ChannelConfig).where(
                     ChannelConfig.channel_type == "wechat",
-                    ChannelConfig.is_configured == True,
+                    ChannelConfig.is_configured,
                 )
             )
             for cfg in result.scalars().all():

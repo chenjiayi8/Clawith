@@ -31,9 +31,7 @@ async def _resolve_skill_content(
     skill_key: str,
     agent_id: uuid.UUID,
 ) -> tuple[str | None, str | None, str | None]:
-    """Resolve skill content by colon key lookup.
-    Returns (content, display_name, emoji) or (None, None, None) if not found.
-    """
+    """Resolve skill content by colon key lookup."""
     import asyncio
 
     from app.services.agent_context import _agent_workspace
@@ -63,51 +61,6 @@ async def _resolve_skill_content(
     )
     return content, entry.get("name", skill_key), entry.get("emoji", "")
 
-
-
-
-def _should_generate_session_title(
-    needs_session_title_generation: bool,
-    skip_user_save: bool,
-    is_onboarding_trigger: bool,
-) -> bool:
-    return needs_session_title_generation and not skip_user_save and not is_onboarding_trigger
-
-
-def _rewrite_edited_user_content(original_content: str, new_visible_content: str) -> str:
-    if not original_content:
-        return new_visible_content
-
-    prefix = ''
-    body = original_content
-    if original_content.startswith('[file:'):
-        newline_idx = original_content.find('\n')
-        if newline_idx != -1:
-            prefix = original_content[:newline_idx + 1]
-            body = original_content[newline_idx + 1:]
-
-    def _is_wrapper_line(line: str) -> bool:
-        return (
-            line.startswith('[image_data:')
-            or line.startswith('[Attachment:')
-            or line.startswith('[附件:')
-            or line.startswith('[图片]')
-            or line.startswith('[Attachment]')
-            or line.startswith('[图片文件已上传:')
-            or line.startswith('[文件已上传:')
-            or line.startswith('[Workspace reference:')
-        )
-
-    lines = body.splitlines()
-    preserved: list[str] = []
-    while lines and _is_wrapper_line(lines[0].strip()):
-        preserved.append(lines.pop(0))
-
-    rebuilt_body = new_visible_content
-    if preserved:
-        rebuilt_body = '\n'.join(preserved + ([new_visible_content] if new_visible_content else []))
-
-    return f'{prefix}{rebuilt_body}' if prefix else rebuilt_body
 
 async def _persist_and_inject_skill(
     skill_content: str,
@@ -163,6 +116,37 @@ async def _inject_skill_if_matched(
         )
     elif ":" in skill_key:
         await websocket.send_json({"type": "skill_error", "message": f"Skill '{skill_key}' not found"})
+
+
+def _find_retry_anchor_message(messages: list, requested_message_id: str | None = None):
+    """Find the visible user message a retry/regenerate request should replay.
+
+    Rules:
+    - If `requested_message_id` points at a user message, retry that turn.
+    - If it points at an assistant/tool message, retry the nearest preceding
+      visible user message.
+    - If omitted, retry the most recent visible user message in the thread.
+    Hidden skill-injection messages are never used as retry anchors.
+    """
+    if not messages:
+        return None
+
+    target_index = len(messages) - 1
+    if requested_message_id:
+        requested = str(requested_message_id)
+        for idx, msg in enumerate(messages):
+            msg_id = getattr(msg, "id", None)
+            if msg_id and str(msg_id) == requested:
+                target_index = idx
+                break
+        else:
+            return None
+
+    for idx in range(target_index, -1, -1):
+        msg = messages[idx]
+        if getattr(msg, "role", None) == "user" and not getattr(msg, "is_hidden", False):
+            return msg
+    return None
 
 
 def _rebuild_conversation_from_messages(
@@ -275,6 +259,34 @@ class ConnectionManager:
 manager = ConnectionManager()
 
 
+def _should_generate_session_title(
+    needs_session_title_generation: bool,
+    skip_user_save: bool,
+    is_onboarding_trigger: bool,
+) -> bool:
+    """Only title the first persisted non-onboarding user exchange."""
+    return needs_session_title_generation and not skip_user_save and not is_onboarding_trigger
+
+
+def _rewrite_edited_user_content(original_content: str, replacement_text: str) -> str:
+    """Preserve attachment/banner wrapper lines when editing a user message body."""
+    preserved_prefix: list[str] = []
+    for line in original_content.splitlines():
+        stripped = line.strip()
+        if (
+            stripped.startswith("[file:")
+            or stripped.startswith("[image_data:")
+            or stripped.startswith("[Attachment:")
+        ):
+            preserved_prefix.append(line)
+            continue
+        break
+
+    if preserved_prefix:
+        return "\n".join([*preserved_prefix, replacement_text])
+    return replacement_text
+
+
 async def maybe_mark_session_read_for_active_viewer(
     db: AsyncSession,
     *,
@@ -293,6 +305,7 @@ async def maybe_mark_session_read_for_active_viewer(
     session.last_read_at_by_user = datetime.now(tz.utc)
     return True
 
+
 @router.get("/api/chat/{agent_id}/history")
 async def get_chat_history(
     agent_id: uuid.UUID,
@@ -308,10 +321,16 @@ async def get_chat_history(
         .limit(200)
     )
     messages = result.scalars().all()
-    messages = [m for m in messages if not getattr(m, 'is_hidden', False)]
     out = []
     for m in messages:
-        entry: dict = {"id": str(m.id), "role": m.role, "content": m.content, "created_at": m.created_at.isoformat() if m.created_at else None}
+        entry: dict = {
+            "id": str(m.id),
+            "role": m.role,
+            "content": m.content,
+            "created_at": m.created_at.isoformat() if m.created_at else None,
+        }
+        if getattr(m, "is_hidden", False):
+            entry["is_hidden"] = True
         if getattr(m, 'thinking', None):
             entry["thinking"] = m.thinking
         if m.role == "tool_call":
@@ -516,6 +535,8 @@ async def websocket_chat(
 
     # Build conversation context from history
     conversation: list[dict] = []
+    if not hasattr(websocket, "_hidden_indices"):
+        websocket._hidden_indices = set()
     for msg in history_messages:
         if msg.role == "tool_call":
             # Convert stored tool_call JSON into OpenAI-format assistant+tool pair
@@ -554,6 +575,8 @@ async def websocket_chat(
             if hasattr(msg, 'thinking') and msg.thinking:
                 entry["thinking"] = msg.thinking
             conversation.append(entry)
+            if getattr(msg, "is_hidden", False):
+                websocket._hidden_indices.add(len(conversation) - 1)
 
     try:
         # Send welcome message on new session (no history)
@@ -563,6 +586,7 @@ async def websocket_chat(
         while True:
             logger.info(f"[WS] Waiting for message from {agent_name}...")
             data = await websocket.receive_json()
+            msg_type = data.get("type", "message")
 
             # Set a unique trace ID for this specific message processing.
             from app.core.logging_config import set_trace_id
@@ -570,9 +594,17 @@ async def websocket_chat(
             trace_id = str(_trace_uuid.uuid4())[:12]
             set_trace_id(trace_id)
 
-            msg_type = data.get("type", "message")
+            skip_user_save = False
+            content = data.get("content", "")
+            display_content = data.get("display_content", "")  # User-facing display text
+            file_name = data.get("file_name", "")  # Original file name for attachment display
             override_model_id = data.get("model_id")  # Optional per-turn model switcher
-            is_onboarding_trigger = False
+            # When the frontend fires an onboarding trigger for a (user, agent)
+            # pair that hasn't met before, it tags the message so the server can
+            # (a) skip persisting a user-side turn and (b) not echo any user
+            # bubble — the agent opens the conversation itself.
+            is_onboarding_trigger = data.get("kind") == "onboarding_trigger"
+            logger.info(f"[WS] Received: {content[:50]}" + (" [onboarding]" if is_onboarding_trigger else ""))
 
             if msg_type == "edit":
                 edit_message_id = data.get("message_id")
@@ -581,8 +613,9 @@ async def websocket_chat(
                     continue
 
                 from sqlalchemy import select as sa_select
-                async with async_session() as db:
-                    edit_result = await db.execute(
+
+                async with async_session() as edit_db:
+                    edit_result = await edit_db.execute(
                         sa_select(ChatMessage).where(
                             ChatMessage.id == edit_message_id,
                             ChatMessage.conversation_id == conv_id,
@@ -595,84 +628,125 @@ async def websocket_chat(
                         await websocket.send_json({"type": "skill_error", "message": "Message not found"})
                         continue
 
-                    await db.execute(
+                    await edit_db.execute(
                         ChatMessage.__table__.delete().where(
                             ChatMessage.conversation_id == conv_id,
                             ChatMessage.created_at >= edit_msg.created_at,
                             ChatMessage.id != edit_msg.id,
                         )
                     )
-                    rewritten_content = _rewrite_edited_user_content(edit_msg.content, edit_content)
-                    edit_msg.content = rewritten_content
-                    await db.commit()
+                    edit_msg.content = edit_content
+                    await edit_db.commit()
 
-                    rebuild_result = await db.execute(
+                    rebuild_result = await edit_db.execute(
                         sa_select(ChatMessage)
                         .where(ChatMessage.agent_id == agent_id, ChatMessage.conversation_id == conv_id)
                         .order_by(ChatMessage.created_at.asc())
                     )
                     rebuild_msgs = rebuild_result.scalars().all()
-                    _rebuild_conversation_from_messages(rebuild_msgs, conversation, websocket)
-                    await websocket.send_json({"type": "edit_ack", "message_id": str(edit_msg.id)})
 
-                content = rewritten_content
-                display_content = edit_content
+                _rebuild_conversation_from_messages(rebuild_msgs, conversation, websocket)
+
+                await websocket.send_json({"type": "edit_ack", "message_id": str(edit_msg.id)})
+                content = edit_content
+                display_content = ""
                 file_name = ""
-                is_onboarding_trigger = False
                 skip_user_save = True
-                logger.info(f"[WS] Edit applied for message {edit_message_id}")
-            else:
-                skip_user_save = False
-                is_onboarding_trigger = False
-                content = data.get("content", "")
-                display_content = data.get("display_content", "")  # User-facing display text
-                file_name = data.get("file_name", "")  # Original file name for attachment display
-                is_onboarding_trigger = data.get("kind") == "onboarding_trigger"
-                logger.info(f"[WS] Received: {content[:50]}" + (" [onboarding]" if is_onboarding_trigger else ""))
 
-                if not content and not is_onboarding_trigger:
-                    continue
+            elif msg_type in {"retry", "regenerate"}:
+                retry_message_id = data.get("message_id")
+                from sqlalchemy import select as sa_select
 
-                if content.strip() == "/role:clear":
-                    async with async_session() as db:
-                        await db.execute(
-                            ChatMessage.__table__.delete().where(
-                                ChatMessage.conversation_id == conv_id,
-                                ChatMessage.is_hidden.is_(True),
-                            )
+                async with async_session() as retry_db:
+                    history_result = await retry_db.execute(
+                        sa_select(ChatMessage)
+                        .where(ChatMessage.agent_id == agent_id, ChatMessage.conversation_id == conv_id)
+                        .order_by(ChatMessage.created_at.asc())
+                    )
+                    persisted_messages = history_result.scalars().all()
+                    retry_anchor = _find_retry_anchor_message(persisted_messages, retry_message_id)
+                    if not retry_anchor:
+                        await websocket.send_json(
+                            {
+                                "type": "skill_error",
+                                "message": "No visible user message found to retry",
+                            }
                         )
-                        await db.commit()
-                    hidden = getattr(websocket, "_hidden_indices", set())
-                    conversation[:] = [m for i, m in enumerate(conversation) if i not in hidden]
-                    websocket._hidden_indices = set()
-                    await websocket.send_json({"type": "skill_loaded", "name": "Roles cleared", "emoji": ""})
-                    continue
+                        continue
 
-                if is_onboarding_trigger:
-                    # Guard against stale triggers. A frontend with a cached
-                    # agent query from before the ritual completed can fire an
-                    # onboarding_trigger on a new session even though the pair
-                    # is already locked. In that case the resolver would return
-                    # no prompt, but the placeholder "Please begin the
-                    # onboarding" would still reach the LLM and the agent would
-                    # dutifully restart the ritual. Short-circuit here, emit an
-                    # event so the frontend refreshes its cache, and move on.
-                    from app.services.onboarding import is_onboarded as _is_onboarded
-                    async with async_session() as _gdb:
-                        if await _is_onboarded(_gdb, agent_id, user_id):
-                            logger.info("[WS] Onboarding trigger ignored — pair already onboarded")
-                            await websocket.send_json({
-                                "type": "onboarded",
-                                "agent_id": str(agent_id),
-                            })
-                            continue
-                    # Minimal placeholder so the LLM has a valid user turn to anchor
-                    # its greeting. The onboarding system prompt is what actually
-                    # drives the reply; this text is never shown or saved.
-                    content = "Please begin the onboarding."
+                    await retry_db.execute(
+                        ChatMessage.__table__.delete().where(
+                            ChatMessage.conversation_id == conv_id,
+                            ChatMessage.created_at > retry_anchor.created_at,
+                        )
+                    )
+                    await retry_db.commit()
 
-                async with async_session() as db:
-                    await _inject_skill_if_matched(content, agent_id, user_id, conv_id, db, conversation, websocket)
+                    rebuild_result = await retry_db.execute(
+                        sa_select(ChatMessage)
+                        .where(ChatMessage.agent_id == agent_id, ChatMessage.conversation_id == conv_id)
+                        .order_by(ChatMessage.created_at.asc())
+                    )
+                    rebuild_msgs = rebuild_result.scalars().all()
+
+                _rebuild_conversation_from_messages(rebuild_msgs, conversation, websocket)
+
+                await websocket.send_json({"type": "retry_ack", "message_id": str(retry_anchor.id)})
+                content = retry_anchor.content or ""
+                display_content = ""
+                file_name = ""
+                skip_user_save = True
+
+            elif content.strip() == "/role:clear":
+                async with async_session() as clear_db:
+                    await clear_db.execute(
+                        ChatMessage.__table__.delete().where(
+                            ChatMessage.conversation_id == conv_id,
+                            ChatMessage.is_hidden.is_(True),
+                        )
+                    )
+                    await clear_db.commit()
+                hidden = getattr(websocket, "_hidden_indices", set())
+                conversation[:] = [m for i, m in enumerate(conversation) if i not in hidden]
+                websocket._hidden_indices = set()
+                await websocket.send_json({"type": "skill_loaded", "name": "Roles cleared", "emoji": ""})
+                continue
+            else:
+                async with async_session() as skill_db:
+                    await _inject_skill_if_matched(
+                        content,
+                        agent_id,
+                        user_id,
+                        conv_id,
+                        skill_db,
+                        conversation,
+                        websocket,
+                    )
+
+            if not content and not is_onboarding_trigger:
+                continue
+            if is_onboarding_trigger:
+                # Guard against stale triggers. A frontend with a cached
+                # agent query from before the ritual completed can fire an
+                # onboarding_trigger on a new session even though the pair
+                # is already locked. In that case the resolver would return
+                # no prompt, but the placeholder "Please begin the
+                # onboarding" would still reach the LLM and the agent would
+                # dutifully restart the ritual. Short-circuit here, emit an
+                # event so the frontend refreshes its cache, and move on.
+                from app.services.onboarding import is_onboarded as _is_onboarded
+                async with async_session() as _gdb:
+                    if await _is_onboarded(_gdb, agent_id, user_id):
+                        logger.info("[WS] Onboarding trigger ignored — pair already onboarded")
+                        await websocket.send_json({
+                            "type": "onboarded",
+                            "agent_id": str(agent_id),
+                        })
+                        continue
+                # Minimal placeholder so the LLM has a valid user turn to anchor
+                # its greeting. The onboarding system prompt is what actually
+                # drives the reply; this text is never shown or saved.
+                content = "Please begin the onboarding."
 
             # Per-message model override — the chat dropdown lets users pick a
             # different tenant-scoped model for this session. Override only the
@@ -714,67 +788,71 @@ async def websocket_chat(
                 # Add user message to conversation (full LLM context)
                 conversation.append({"role": "user", "content": content})
 
-                # Save user message to DB.
-                #
-                # Bootstrap trigger: the user never sent anything — the frontend
-                # fired a synthetic turn so the agent could greet first. Don't
-                # persist and don't title the session from it.
-                #
-                # If the LLM content contains [image_data:...] markers, persist the full
-                # payload so subsequent turns can still forward the image to the model.
-                has_image_marker = "[image_data:" in content
-                if has_image_marker:
-                    saved_content = f"[file:{file_name}]\n{content}" if file_name else content
-                else:
-                    saved_content = display_content if display_content else content
-                    if file_name:
-                        saved_content = f"[file:{file_name}]\n{saved_content}"
-                if is_onboarding_trigger:
-                    logger.info("[WS] Onboarding trigger — skipping user-message persistence")
-                    # Title this session "Onboarding" up front so it's identifiable
-                    # in the session list even before the user has typed anything.
-                    # The auto-title logic in the normal path only overwrites titles
-                    # that start with "Session ", so this stays sticky.
-                    async with async_session() as _sdb:
-                        from app.models.chat_session import ChatSession as _CS
-                        _sr = await _sdb.execute(
-                            select(_CS).where(_CS.id == uuid.UUID(conv_id))
-                        )
-                        _s = _sr.scalar_one_or_none()
-                        if _s and _s.title.startswith("Session "):
-                            _s.title = "Onboarding"
-                            await _sdb.commit()
-                else:
-                    async with async_session() as db:
-                        user_msg = ChatMessage(
-                            agent_id=agent_id,
-                            user_id=user_id,
-                            role="user",
-                            content=saved_content,
-                            conversation_id=conv_id,
-                        )
-                        db.add(user_msg)
-                        # Update session last_message_at + auto-title on first message
-                        from app.models.chat_session import ChatSession as _CS
-                        from datetime import datetime as _dt2, timezone as _tz2
-                        _now = _dt2.now(_tz2.utc)
-                        _sess_r = await db.execute(
-                            select(_CS).where(_CS.id == uuid.UUID(conv_id))
-                        )
-                        _sess = _sess_r.scalar_one_or_none()
-                        if _sess:
-                            _sess.last_message_at = _now
-                            if not history_messages and _sess.title.startswith("Session "):
-                                # Use display_content for title (avoids raw base64/markers)
-                                title_src = display_content if display_content else content
-                                # Clean up common prefixes from image/file messages
-                                clean_title = title_src.replace("[图片] ", "📷 ").replace("[image_data:", "").strip()
-                                if file_name and not clean_title:
-                                    clean_title = f"📎 {file_name}"
-                                _sess.title = clean_title[:40] if clean_title else content[:40]
-                        await db.commit()
-                    logger.info("[WS] User message saved")
-                    await websocket.send_json({"type": "user_saved", "message_id": str(user_msg.id)})
+            # Save user message to DB.
+            #
+            # Bootstrap trigger: the user never sent anything — the frontend
+            # fired a synthetic turn so the agent could greet first. Don't
+            # persist and don't title the session from it.
+            #
+            # If the LLM content contains [image_data:...] markers, persist the full
+            # payload so subsequent turns can still forward the image to the model.
+            has_image_marker = "[image_data:" in content
+            if has_image_marker:
+                saved_content = f"[file:{file_name}]\n{content}" if file_name else content
+            else:
+                saved_content = display_content if display_content else content
+                if file_name:
+                    saved_content = f"[file:{file_name}]\n{saved_content}"
+            user_msg_id: str | None = None
+            if skip_user_save:
+                logger.info("[WS] Edit replay — skipping new user-message persistence")
+            elif is_onboarding_trigger:
+                logger.info("[WS] Onboarding trigger — skipping user-message persistence")
+                # Title this session "Onboarding" up front so it's identifiable
+                # in the session list even before the user has typed anything.
+                # The auto-title logic in the normal path only overwrites titles
+                # that start with "Session ", so this stays sticky.
+                async with async_session() as _sdb:
+                    from app.models.chat_session import ChatSession as _CS
+                    _sr = await _sdb.execute(
+                        select(_CS).where(_CS.id == uuid.UUID(conv_id))
+                    )
+                    _s = _sr.scalar_one_or_none()
+                    if _s and _s.title.startswith("Session "):
+                        _s.title = "Onboarding"
+                        await _sdb.commit()
+            else:
+                async with async_session() as db:
+                    user_msg = ChatMessage(
+                        agent_id=agent_id,
+                        user_id=user_id,
+                        role="user",
+                        content=saved_content,
+                        conversation_id=conv_id,
+                    )
+                    db.add(user_msg)
+                    # Update session last_message_at + auto-title on first message
+                    from app.models.chat_session import ChatSession as _CS
+                    from datetime import datetime as _dt2, timezone as _tz2
+                    _now = _dt2.now(_tz2.utc)
+                    _sess_r = await db.execute(
+                        select(_CS).where(_CS.id == uuid.UUID(conv_id))
+                    )
+                    _sess = _sess_r.scalar_one_or_none()
+                    if _sess:
+                        _sess.last_message_at = _now
+                        if not history_messages and _sess.title.startswith("Session "):
+                            # Use display_content for title (avoids raw base64/markers)
+                            title_src = display_content if display_content else content
+                            # Clean up common prefixes from image/file messages
+                            clean_title = title_src.replace("[图片] ", "📷 ").replace("[image_data:", "").strip()
+                            if file_name and not clean_title:
+                                clean_title = f"📎 {file_name}"
+                            _sess.title = clean_title[:40] if clean_title else content[:40]
+                    await db.commit()
+                    user_msg_id = str(user_msg.id)
+                logger.info("[WS] User message saved")
+                await websocket.send_json({"type": "user_saved", "message_id": user_msg_id})
 
             # ── OpenClaw routing: insert into gateway_messages instead of LLM ──
             if agent_type == "openclaw":
@@ -1206,16 +1284,55 @@ async def websocket_chat(
                     user_id=user_id,
                 )
                 await db.commit()
+                assistant_msg_id = str(assistant_msg.id)
             logger.info("[WS] Assistant message saved")
 
+            if not history_messages and not is_onboarding_trigger:
+                try:
+                    tenant_id = getattr(effective_llm_model, "tenant_id", None) or getattr(llm_model, "tenant_id", None)
+                    if tenant_id:
+                        from app.models.tenant import Tenant as _Tenant
+                        from app.models.llm import LLMModel as _UtilityLLM
+                        from app.services.session_title import generate_session_title
+                        import asyncio as _asyncio_title
+
+                        async with async_session() as title_db:
+                            tenant_result = await title_db.execute(select(_Tenant).where(_Tenant.id == tenant_id))
+                            tenant = tenant_result.scalar_one_or_none()
+                            utility_model = None
+                            if tenant and tenant.utility_model_id:
+                                utility_result = await title_db.execute(
+                                    select(_UtilityLLM).where(_UtilityLLM.id == tenant.utility_model_id)
+                                )
+                                utility_model = utility_result.scalar_one_or_none()
+
+                        if utility_model:
+                            _asyncio_title.create_task(
+                                generate_session_title(
+                                    conv_id,
+                                    display_content if display_content else content,
+                                    assistant_response,
+                                    utility_model,
+                                    websocket,
+                                )
+                            )
+                except Exception as title_err:
+                    logger.warning(f"[WS] Session title scheduling failed: {title_err}")
+
             # Final 'done' packet
-            await websocket.send_json({
-                "type": "done",
-                "role": "assistant",
-                "content": assistant_response,
-                "message_id": str(assistant_msg.id),
-            })
-            logger.info("[WS] Response done sent to client")
+            await websocket.send_json(
+                {
+                    "type": "done",
+                    "role": "assistant",
+                    "content": assistant_response,
+                    "message_id": assistant_msg_id,
+                }
+            )
+
+            # Re-process any queued messages (if user sent something during generation)
+            for qm in queued_messages:
+                # In a real implementation, you might want to push these back to the main loop
+                pass
 
             # ── Auto-generate session title on first real exchange only ──
             if _should_generate_session_title(needs_session_title_generation, skip_user_save, is_onboarding_trigger) and _tenant_id:

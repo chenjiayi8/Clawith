@@ -3,7 +3,6 @@
 import uuid
 from datetime import datetime
 
-import sqlalchemy as sa
 from sqlalchemy import Boolean, DateTime, Enum, ForeignKey, Integer, String, func
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -104,11 +103,15 @@ class User(Base):
     identity: Mapped["Identity"] = relationship(back_populates="tenant_users", lazy="selectin")
 
     # Association proxies for backward compatibility
-    email = association_proxy("identity", "email")
-    username = association_proxy("identity", "username")
-    password_hash = association_proxy("identity", "password_hash")
-    email_verified = association_proxy("identity", "email_verified")
-    primary_mobile = association_proxy("identity", "phone")
+    email = association_proxy("identity", "email", creator=lambda value: Identity(email=value))
+    username = association_proxy("identity", "username", creator=lambda value: Identity(username=value))
+    password_hash = association_proxy(
+        "identity", "password_hash", creator=lambda value: Identity(password_hash=value)
+    )
+    email_verified = association_proxy(
+        "identity", "email_verified", creator=lambda value: Identity(email_verified=value)
+    )
+    primary_mobile = association_proxy("identity", "phone", creator=lambda value: Identity(phone=value))
 
     created_agents: Mapped[list["Agent"]] = relationship(back_populates="creator", foreign_keys="Agent.creator_id")
 

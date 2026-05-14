@@ -62,8 +62,9 @@ class Tenant(Base):
     default_model_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("llm_models.id", ondelete="SET NULL"), nullable=True,
     )
+    # Optional utility model used for non-primary helper flows such as session title generation.
     utility_model_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("llm_models.id", ondelete="SET NULL"), nullable=True
+        UUID(as_uuid=True), ForeignKey("llm_models.id", ondelete="SET NULL"), nullable=True,
     )
 
     @property

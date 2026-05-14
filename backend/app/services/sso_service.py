@@ -524,8 +524,8 @@ class SSOService:
         # IP Address: only ONE tenant in the whole system can have SSO enabled.
         # Check if any *other* tenant has an active SSO-enabled provider.
         query = select(IdentityProvider).where(
-            IdentityProvider.sso_login_enabled == True,
-            IdentityProvider.is_active == True,
+            IdentityProvider.sso_login_enabled,
+            IdentityProvider.is_active,
             IdentityProvider.tenant_id != tenant_id,
         )
         result = await db.execute(query)

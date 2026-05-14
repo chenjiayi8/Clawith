@@ -274,7 +274,7 @@ async def join_company(
     ic_result = await db.execute(
         select(InvitationCode).where(
             InvitationCode.code == data.invitation_code,
-            InvitationCode.is_active == True,
+            InvitationCode.is_active,
             InvitationCode.tenant_id.is_not(None),
         )
     )

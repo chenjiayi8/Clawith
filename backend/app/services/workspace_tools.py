@@ -179,13 +179,14 @@ async def tool_request_build_human(
     return f"Build request '{name}' created for slug '{slug}'."
 
 
-async def tool_list_build_requests(agent_id: uuid.UUID) -> str:
+async def tool_list_build_requests() -> str:
     """List pending build requests."""
-    tenant_id = await _get_agent_tenant_id(agent_id)
     async with async_session() as db:
-        query = select(WorkspaceProject).where(WorkspaceProject.status == "requested")
-        query = _scope_workspace_project_query(query, tenant_id, include_platform_global=False)
-        result = await db.execute(query.order_by(WorkspaceProject.created_at.asc()))
+        result = await db.execute(
+            select(WorkspaceProject)
+            .where(WorkspaceProject.status == "requested")
+            .order_by(WorkspaceProject.created_at.asc())
+        )
         projects = result.scalars().all()
 
     if not projects:
@@ -375,13 +376,12 @@ async def tool_request_container_deploy(
     )
 
 
-async def tool_list_workspace_projects(agent_id: uuid.UUID) -> str:
+async def tool_list_workspace_projects() -> str:
     """List all workspace projects."""
-    tenant_id = await _get_agent_tenant_id(agent_id)
     async with async_session() as db:
-        query = select(WorkspaceProject)
-        query = _scope_workspace_project_query(query, tenant_id, include_platform_global=False)
-        result = await db.execute(query.order_by(WorkspaceProject.created_at.desc()))
+        result = await db.execute(
+            select(WorkspaceProject).order_by(WorkspaceProject.created_at.desc())
+        )
         projects = result.scalars().all()
 
     if not projects:
@@ -397,17 +397,16 @@ async def tool_list_workspace_projects(agent_id: uuid.UUID) -> str:
     return "\n".join(lines)
 
 
-async def tool_undeploy_project(arguments: dict, agent_id: uuid.UUID) -> str:
+async def tool_undeploy_project(arguments: dict) -> str:
     """Remove a deployed workspace project."""
     slug = arguments.get("slug", "").strip()
     if not slug:
         return "Error: 'slug' is required."
 
-    tenant_id = await _get_agent_tenant_id(agent_id)
     async with async_session() as db:
-        query = select(WorkspaceProject).where(WorkspaceProject.slug == slug)
-        query = _scope_workspace_project_query(query, tenant_id, include_platform_global=False)
-        result = await db.execute(query)
+        result = await db.execute(
+            select(WorkspaceProject).where(WorkspaceProject.slug == slug)
+        )
         project = result.scalar_one_or_none()
         if not project:
             return f"Error: Project '{slug}' not found."
@@ -453,12 +452,11 @@ async def tool_undeploy_project(arguments: dict, agent_id: uuid.UUID) -> str:
     return f"Project '{slug}' has been undeployed."
 
 
-async def tool_get_bug_reports(arguments: dict, agent_id: uuid.UUID) -> str:
+async def tool_get_bug_reports(arguments: dict) -> str:
     """List bug reports, optionally filtered by status."""
     from sqlalchemy.orm import selectinload
 
     status_filter = arguments.get("status_filter", "open").strip()
-    tenant_id = await _get_agent_tenant_id(agent_id)
 
     async with async_session() as db:
         query = (
@@ -466,7 +464,6 @@ async def tool_get_bug_reports(arguments: dict, agent_id: uuid.UUID) -> str:
             .options(selectinload(WorkspaceBugReport.project))
             .join(WorkspaceProject)
         )
-        query = _scope_workspace_project_query(query, tenant_id, include_platform_global=False)
         if status_filter != "all":
             query = query.where(WorkspaceBugReport.status == status_filter)
         query = query.order_by(WorkspaceBugReport.created_at.desc())
@@ -488,7 +485,7 @@ async def tool_get_bug_reports(arguments: dict, agent_id: uuid.UUID) -> str:
     return "\n".join(lines)
 
 
-async def tool_resolve_bug(arguments: dict, agent_id: uuid.UUID) -> str:
+async def tool_resolve_bug(arguments: dict) -> str:
     """Mark a bug report as fixed."""
     bug_id = arguments.get("bug_report_id", "").strip()
     if not bug_id:
@@ -499,13 +496,8 @@ async def tool_resolve_bug(arguments: dict, agent_id: uuid.UUID) -> str:
     except ValueError:
         return f"Error: Invalid UUID '{bug_id}'."
 
-    tenant_id = await _get_agent_tenant_id(agent_id)
-
     async with async_session() as db:
-        query = select(WorkspaceBugReport).join(WorkspaceProject).where(WorkspaceBugReport.id == bug_uuid)
-        query = _scope_workspace_project_query(query, tenant_id, include_platform_global=False)
-        result = await db.execute(query)
-        report = result.scalar_one_or_none()
+        report = await db.get(WorkspaceBugReport, bug_uuid)
         if not report:
             return f"Error: Bug report '{bug_id}' not found."
         report.status = "fixed"

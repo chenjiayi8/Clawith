@@ -60,7 +60,7 @@ async def receive_webhook(token: str, request: Request):
         result = await db.execute(
             select(AgentTrigger).where(
                 AgentTrigger.type == "webhook",
-                AgentTrigger.is_enabled == True,
+                AgentTrigger.is_enabled,
             )
         )
         triggers = result.scalars().all()

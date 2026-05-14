@@ -8,11 +8,9 @@ Supports both:
 from __future__ import annotations
 
 import asyncio
-import inspect
 import logging
 import smtplib
 import ssl
-import uuid
 from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime
@@ -20,7 +18,7 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from email.utils import formataddr, make_msgid
 
-from app.core.email import force_ipv4, send_smtp_email
+from app.core.email import force_ipv4
 
 logger = logging.getLogger(__name__)
 
@@ -116,17 +114,27 @@ def _send_email_with_config_sync(config: SystemEmailConfig, to: str, subject: st
     msg["Date"] = datetime.now().strftime("%a, %d %b %Y %H:%M:%S %z")
     msg.attach(MIMEText(body, "plain", "utf-8"))
 
-    send_smtp_email(
-        host=config.smtp_host,
-        port=config.smtp_port,
-        user=config.smtp_username,
-        password=config.smtp_password,
-        from_addr=config.from_address,
-        to_addrs=[to],
-        msg_string=msg.as_string(),
-        use_ssl=config.smtp_ssl,
-        timeout=config.smtp_timeout_seconds,
-    )
+    timeout = config.smtp_timeout_seconds
+    with force_ipv4():
+        if config.smtp_ssl:
+            context = ssl.create_default_context()
+            with smtplib.SMTP_SSL(
+                config.smtp_host,
+                config.smtp_port,
+                context=context,
+                timeout=timeout,
+            ) as smtp:
+                if config.smtp_username:
+                    smtp.login(config.smtp_username, config.smtp_password)
+                smtp.sendmail(config.from_address, [to], msg.as_string())
+        else:
+            with smtplib.SMTP(config.smtp_host, config.smtp_port, timeout=timeout) as smtp:
+                smtp.ehlo()
+                smtp.starttls(context=ssl.create_default_context())
+                smtp.ehlo()
+                if config.smtp_username:
+                    smtp.login(config.smtp_username, config.smtp_password)
+                smtp.sendmail(config.from_address, [to], msg.as_string())
 
 
 async def send_password_reset_email(
@@ -188,6 +196,11 @@ async def deliver_broadcast_emails(recipients: Iterable[BroadcastEmailRecipient]
             logger.warning("Failed to deliver broadcast email to %s: %s", recipient.email, exc)
 
 
+async def run_background_email_job(fn, *args, **kwargs) -> None:
+    """Small async wrapper for background email tasks."""
+    await fn(*args, **kwargs)
+
+
 # ── Email Templates ──────────────────────────────────────────────────────────
 
 # Default templates for each email scenario.
@@ -239,8 +252,6 @@ async def get_email_templates(db=None) -> dict[str, dict[str, str]]:
     Returns:
         A dict mapping scenario_key -> {"subject": str, "body": str}
     """
-    from sqlalchemy import select
-    from app.models.system_settings import SystemSetting
 
     templates = dict(DEFAULT_EMAIL_TEMPLATES)  # start with defaults
 

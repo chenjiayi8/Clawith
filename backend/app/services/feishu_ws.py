@@ -1,8 +1,6 @@
 """Feishu WebSocket Long Connection Manager."""
 
 import asyncio
-import json
-import threading
 from typing import Any, Dict
 import uuid
 
@@ -359,7 +357,7 @@ class FeishuWSManager:
         async with async_session() as db:
             result = await db.execute(
                 select(ChannelConfig).where(
-                    ChannelConfig.is_configured == True,
+                    ChannelConfig.is_configured,
                     ChannelConfig.channel_type == "feishu",
                 )
             )

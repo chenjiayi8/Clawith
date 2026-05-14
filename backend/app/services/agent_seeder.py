@@ -2,20 +2,18 @@
 
 import shutil
 import uuid
-from datetime import datetime, timezone
 from pathlib import Path
 
 from loguru import logger
 
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 from sqlalchemy.exc import IntegrityError
 
 from app.database import async_session
 from app.models.agent import Agent, AgentPermission
 from app.models.org import AgentAgentRelationship
-from app.models.skill import Skill, SkillFile
+from app.models.skill import Skill
 from app.models.tool import Tool, AgentTool
 from app.models.trigger import AgentTrigger
 from app.models.user import User
@@ -190,14 +188,8 @@ async def seed_default_agents():
 
     Idempotency is guarded by a '.seeded' marker file in AGENT_DATA_DIR rather
     than by agent name, so the seeder does NOT re-run if the user renames or
-    deletes the default agents. Delete the marker manually to re-seed.
+    deletes the default agents.  Delete the marker manually to re-seed.
     """
-    import os
-
-    if os.environ.get("SKIP_DEFAULT_AGENTS", "").lower() in ("true", "1", "yes"):
-        logger.info("[AgentSeeder] SKIP_DEFAULT_AGENTS is set, skipping default agents")
-        return
-
     # --- Idempotency guard: file-based marker (survives agent renames/deletes) ---
     seed_marker = Path(settings.AGENT_DATA_DIR) / ".seeded"
     if seed_marker.exists():
@@ -324,7 +316,7 @@ async def seed_default_agents():
 
         # ── Assign all default tools ──
         default_tools_result = await db.execute(
-            select(Tool).where(Tool.is_default == True)
+            select(Tool).where(Tool.is_default)
         )
         default_tools = default_tools_result.scalars().all()
 
@@ -542,7 +534,7 @@ async def seed_okr_agent():
         # ── Assign default tools + OKR-specific tools ──
         # Default tools: all tools where is_default=True
         default_tools_result = await db.execute(
-            select(Tool).where(Tool.is_default == True)
+            select(Tool).where(Tool.is_default)
         )
         default_tools = default_tools_result.scalars().all()
         for tool in default_tools:

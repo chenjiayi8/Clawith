@@ -31,7 +31,23 @@ from app.models.tenant import Tenant  # noqa: F401
 from app.models.tool import Tool  # noqa: F401
 from app.models.trigger import AgentTrigger  # noqa: F401
 from app.models.agent_credential import AgentCredential  # noqa: F401
+from app.models.focus import AgentFocusItem  # noqa: F401
+from app.models.gateway_message import GatewayMessage  # noqa: F401
+from app.models.notification import Notification  # noqa: F401
+from app.models.okr import (  # noqa: F401
+    CompanyReport,
+    MemberDailyReport,
+    OKRAlignment,
+    OKRKeyResult,
+    OKRObjective,
+    OKRProgressLog,
+    OKRSettings,
+    WorkReport,
+)
 from app.models.onboarding import UserTenantOnboarding  # noqa: F401
+from app.models.published_page import PublishedPage  # noqa: F401
+from app.models.tenant_setting import TenantSetting  # noqa: F401
+from app.models.workspace import WorkspaceBugReport, WorkspaceEditLock, WorkspaceFileRevision, WorkspaceProject  # noqa: F401
 
 config = context.config
 settings = get_settings()

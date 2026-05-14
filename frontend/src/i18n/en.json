@@ -1059,11 +1059,6 @@
       "testSuccess": "OK ({{latency}}ms)",
       "testFailed": "Test failed: {{error}}\n\nLatency: {{latency}}ms",
       "testError": "Test error: {{message}}",
-      "editModel": "Edit Model",
-      "vision": "Vision",
-      "temperature": "Temperature",
-      "temperaturePlaceholder": "e.g. 0.7 or 1.0 (Leave empty for default)",
-      "temperatureDesc": "Leave empty to use the provider default. o1/o3 reasoning models usually require 1.0",
       "utilityModel": "Utility Model",
       "utilityModelDesc": "Used for background tasks like auto-generating session titles. Select from your added models.",
       "noUtilityModel": "None (use default behavior)"

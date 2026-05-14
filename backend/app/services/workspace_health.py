@@ -5,7 +5,7 @@ import logging
 from datetime import datetime, timedelta, timezone
 
 import httpx
-from sqlalchemy import select, update
+from sqlalchemy import select
 
 from app.config import get_settings
 from app.database import async_session

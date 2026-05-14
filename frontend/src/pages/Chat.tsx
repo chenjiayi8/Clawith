@@ -1,17 +1,11 @@
 import { useQuery } from '@tanstack/react-query';
-import { useState, useEffect, useRef, useCallback } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useParams } from 'react-router-dom';
 import MarkdownRenderer from '../components/MarkdownRenderer';
 import SkillAutocomplete from '../components/SkillAutocomplete';
-import AgentBayLivePanel, { LivePreviewState } from '../components/AgentBayLivePanel';
-import ModelSwitcher from '../components/ModelSwitcher';
-import { agentApi, enterpriseApi, tenantApi, uploadFileWithProgress } from '../services/api';
-import { IconPaperclip, IconSend } from '@tabler/icons-react';
-import { formatFileSize } from '../utils/formatFileSize';
+import { agentApi, enterpriseApi } from '../services/api';
 import { useAuthStore } from '../stores';
-import { useDropZone } from '../hooks/useDropZone';
-import { useToast } from '../components/Toast/ToastProvider';
 
 /* ── Inline SVG Icons ── */
 const Icons = {
@@ -33,6 +27,16 @@ const Icons = {
         <svg width="28" height="28" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round">
             <path d="M2 3a1 1 0 011-1h10a1 1 0 011 1v7a1 1 0 01-1 1H5l-3 3V3z" />
             <path d="M5 5.5h6M5 8h4" />
+        </svg>
+    ),
+    clip: (
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M13.5 7l-5.8 5.8a3 3 0 01-4.2-4.2L9.3 2.8a2 2 0 012.8 2.8L6.3 11.4a1 1 0 01-1.4-1.4L10.7 4.2" />
+        </svg>
+    ),
+    loader: (
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round">
+            <path d="M8 2v3M8 11v3M3.8 3.8l2.1 2.1M10.1 10.1l2.1 2.1M2 8h3M11 8h3M3.8 12.2l2.1-2.1M10.1 5.9l2.1-2.1" />
         </svg>
     ),
     tool: (
@@ -59,251 +63,28 @@ interface Message {
     timestamp?: string;
     isSkillIndicator?: boolean;
     hiddenContent?: string | null;
-    _isToolGroup?: boolean;
-}
-
-// CSS keyframe for the pulse/breathing LED — injected once into <head>
-const PULSE_STYLE_ID = 'cw-tool-pulse-style';
-if (typeof document !== 'undefined' && !document.getElementById(PULSE_STYLE_ID)) {
-    const s = document.createElement('style');
-    s.id = PULSE_STYLE_ID;
-    s.textContent = `
-        @keyframes cw-pulse-led {
-            0%, 100% { opacity: 1; transform: scale(1); box-shadow: 0 0 0 0 rgba(107,114,128,0.45); }
-            50%       { opacity: 0.55; transform: scale(1.5); box-shadow: 0 0 0 4px rgba(107,114,128,0); }
-        }
-        .cw-running-led { animation: cw-pulse-led 1.4s ease-in-out infinite; }
-    `;
-    document.head.appendChild(s);
-}
-
-function ChatToolChain({ toolCalls }: { toolCalls: ToolCall[] }) {
-    const { t } = useTranslation();
-    const [expanded, setExpanded] = useState(false);
-    const count = toolCalls.length;
-
-    // Find the last tool without a result — that is the currently-executing one.
-    const activeIdx = (() => {
-        for (let i = toolCalls.length - 1; i >= 0; i--) {
-            if (!toolCalls[i].result) return i;
-        }
-        return -1; // -1 = all done
-    })();
-    const isRunning = activeIdx >= 0;
-    const activeTool = isRunning ? toolCalls[activeIdx] : null;
-
-    return (
-        <div style={{
-            borderRadius: '8px',
-            background: isRunning ? 'color-mix(in srgb, var(--bg-secondary) 72%, var(--bg-primary))' : 'var(--bg-primary)',
-            border: `1px solid ${isRunning ? 'var(--border-default)' : 'var(--border-subtle)'}`,
-            fontSize: '12px',
-            overflow: 'hidden',
-            marginBottom: '6px',
-            transition: 'border-color 0.3s ease',
-        }}>
-            {/* ── Header / toggle row ── */}
-            <button
-                onClick={() => setExpanded(v => !v)}
-                style={{
-                    background: 'none', border: 'none', cursor: 'pointer',
-                    width: '100%', display: 'flex', alignItems: 'center', gap: '6px',
-                    padding: '7px 10px',
-                    color: 'var(--text-secondary)',
-                }}
-            >
-                {/* Left label: title + running-tool indicator */}
-                <span style={{ flex: 1, textAlign: 'left', display: 'flex', alignItems: 'center', gap: '6px', minWidth: 0 }}>
-                    <span style={{ fontWeight: 500, flexShrink: 0, color: 'var(--text-primary)' }}>{t('agent.chat.toolCallChain')}</span>
-                    <span style={{ color: 'var(--text-tertiary)', flexShrink: 0 }}>·</span>
-                    {isRunning && activeTool ? (
-                        <>
-                            {/* Pulse LED: breathing dot while a tool runs */}
-                            <span
-                                className="cw-running-led"
-                                style={{
-                                    display: 'inline-block',
-                                    width: '6px', height: '6px',
-                                    borderRadius: '50%',
-                                    background: 'var(--text-tertiary)',
-                                    flexShrink: 0,
-                                }}
-                            />
-                            {/* Currently-running tool name */}
-                            <span style={{
-                                fontFamily: 'var(--font-mono)',
-                                fontSize: '11px',
-                                color: 'var(--text-secondary)',
-                                overflow: 'hidden',
-                                textOverflow: 'ellipsis',
-                                whiteSpace: 'nowrap',
-                            }}>
-                                {activeTool.name}
-                            </span>
-                        </>
-                    ) : (
-                        /* Static green dot when all tools are done */
-                        <span style={{
-                            display: 'inline-block',
-                            width: '6px', height: '6px',
-                            borderRadius: '50%',
-                            background: '#22c55e',
-                            flexShrink: 0,
-                            opacity: 0.85,
-                        }} />
-                    )}
-                </span>
-
-                {/* Count badge */}
-                <span style={{
-                    background: 'var(--bg-secondary)', color: 'var(--text-secondary)',
-                    borderRadius: '10px', padding: '1px 7px',
-                    fontSize: '10px', fontWeight: 600, flexShrink: 0,
-                }}>
-                    {count}
-                </span>
-
-                {/* Expand chevron */}
-                <span style={{
-                    fontSize: '10px', color: 'var(--text-tertiary)',
-                    transition: 'transform 0.2s', display: 'inline-block',
-                    transform: expanded ? 'rotate(90deg)' : 'rotate(0deg)',
-                    flexShrink: 0,
-                }}>▶</span>
-            </button>
-
-            {/* ── Collapsed: pills with individual run-state dots ── */}
-            {!expanded && count > 0 && (
-                <div style={{ padding: '0 10px 7px 10px', display: 'flex', flexWrap: 'wrap', gap: '4px' }}>
-                    {toolCalls.map((tc, i) => {
-                        const running = !tc.result;
-                        return (
-                            <span key={i} style={{
-                                background: running ? 'var(--bg-secondary)' : 'var(--bg-primary)',
-                                border: '1px solid var(--border-subtle)',
-                                borderRadius: '4px', padding: '1px 6px',
-                                fontSize: '10px', color: 'var(--text-secondary)',
-                                fontFamily: 'var(--font-mono)',
-                                display: 'inline-flex', alignItems: 'center', gap: '4px',
-                            }}>
-                                {running && (
-                                    <span
-                                        className="cw-running-led"
-                                        style={{
-                                            display: 'inline-block',
-                                            width: '4px', height: '4px',
-                                            borderRadius: '50%',
-                                            background: 'var(--text-tertiary)',
-                                            flexShrink: 0,
-                                        }}
-                                    />
-                                )}
-                                {tc.name}
-                            </span>
-                        );
-                    })}
-                </div>
-            )}
-
-            {/* ── Expanded: each tool's full detail row ── */}
-            {expanded && (
-                <div style={{ borderTop: '1px solid var(--border-subtle)' }}>
-                    {toolCalls.map((tc, i) => {
-                        const running = !tc.result;
-                        return (
-                            <div key={i} style={{
-                                padding: '7px 10px',
-                                borderBottom: i < toolCalls.length - 1 ? '1px solid var(--border-subtle)' : 'none',
-                            }}>
-                                <div style={{ display: 'flex', alignItems: 'center', gap: '5px', marginBottom: '4px' }}>
-                                    {/* Status dot: amber + pulse = running; green = done */}
-                                    <span
-                                        className={running ? 'cw-running-led' : undefined}
-                                        style={{
-                                            display: 'inline-block',
-                                            width: '5px', height: '5px',
-                                            borderRadius: '50%',
-                                            background: running ? '#f59e0b' : '#22c55e',
-                                            flexShrink: 0,
-                                        }}
-                                    />
-                                    <span style={{ fontFamily: 'var(--font-mono)', fontSize: '11px', color: 'var(--text-secondary)', fontWeight: 600 }}>
-                                        {tc.name}
-                                    </span>
-                                    {running && (
-                                        <span style={{ fontSize: '10px', color: 'var(--text-tertiary)', marginLeft: 'auto' }}>
-                                            {t('common.loading')}
-                                        </span>
-                                    )}
-                                </div>
-                                {tc.args && Object.keys(tc.args).length > 0 && (
-                                    <div style={{
-                                        fontFamily: 'var(--font-mono)', fontSize: '10px',
-                                        color: 'var(--text-tertiary)', whiteSpace: 'pre-wrap',
-                                        wordBreak: 'break-all', maxHeight: '80px', overflowY: 'auto',
-                                        background: 'var(--bg-secondary)', borderRadius: '4px',
-                                        padding: '4px 6px', marginBottom: tc.result ? '4px' : 0,
-                                    }}>
-                                        {JSON.stringify(tc.args, null, 2)}
-                                    </div>
-                                )}
-                                {tc.result && (
-                                    <div style={{
-                                        fontSize: '10px', color: 'var(--text-secondary)',
-                                        whiteSpace: 'pre-wrap', wordBreak: 'break-all',
-                                        maxHeight: '80px', overflowY: 'auto',
-                                        borderTop: '1px solid var(--border-subtle)', paddingTop: '4px',
-                                    }}>
-                                        {tc.result.length > 500 ? tc.result.slice(0, 500) + '…' : tc.result}
-                                    </div>
-                                )}
-                            </div>
-                        );
-                    })}
-                </div>
-            )}
-        </div>
-    );
 }
 
 export default function Chat() {
-    const { t, i18n } = useTranslation();
-    const toast = useToast();
+    const { t } = useTranslation();
     const { id } = useParams<{ id: string }>();
     const token = useAuthStore((s) => s.token);
     const [messages, setMessages] = useState<Message[]>([]);
     const [input, setInput] = useState('');
     const [connected, setConnected] = useState(false);
-    const [uploadProgress, setUploadProgress] = useState<{
-        name: string;
-        percent: number;
-        previewUrl?: string;
-        sizeBytes: number;
-    } | null>(null);
+    const [uploading, setUploading] = useState(false);
     const [streaming, setStreaming] = useState(false);
     const [isWaiting, setIsWaiting] = useState(false);
     const [editingId, setEditingId] = useState<string | null>(null);
     const [editContent, setEditContent] = useState('');
     const [attachedFile, setAttachedFile] = useState<{ name: string; text: string; path?: string; imageUrl?: string } | null>(null);
-    const [liveState, setLiveState] = useState<LivePreviewState>({});
-    const [livePanelVisible, setLivePanelVisible] = useState(false);
-    const [wsSessionId, setWsSessionId] = useState<string>('');
     const [drawerContent, setDrawerContent] = useState<{ name: string; content: string } | null>(null);
     const wsRef = useRef<WebSocket | null>(null);
     const messagesEndRef = useRef<HTMLDivElement>(null);
-    const messagesContainerRef = useRef<HTMLDivElement>(null);
-    const isNearBottomRef = useRef(true);
-    const userPinnedAwayFromBottomRef = useRef(false);
     const fileInputRef = useRef<HTMLInputElement>(null);
-    // Ref to the chat textarea for direct DOM height manipulation
-    const inputRef = useRef<HTMLTextAreaElement>(null);
     const pendingToolCalls = useRef<ToolCall[]>([]);
     const streamContent = useRef('');
     const thinkingContent = useRef('');
-    // Track history load + whether we've already fired the one-shot onboarding
-    // trigger so the agent greets the user at most once per mount.
-    const historyLoaded = useRef(false);
-    const onboardingKickoffSent = useRef(false);
 
     const { data: agent } = useQuery({
         queryKey: ['agent', id],
@@ -311,97 +92,35 @@ export default function Chat() {
         enabled: !!id,
     });
 
-    // Tenant default model — used to render the "默认" tag and as a visual
-    // fallback when an agent has no explicit primary model.
-    const { data: myTenant } = useQuery({
-        queryKey: ['tenant', 'me'],
-        queryFn: () => tenantApi.me(),
-        staleTime: 5 * 60 * 1000,
-        refetchOnMount: 'always',
-    });
-
-    // Chat-side selected model is a per-session override. It is sent with each
-    // message over WebSocket and should not require permission to edit the agent.
-    // Re-sync on session changes so new conversations start from the saved agent
-    // model rather than a stale prior override.
-    const [overrideModelId, setOverrideModelId] = useState<string | null>(null);
-    useEffect(() => {
-        if (agent?.primary_model_id && agent.primary_model_id !== overrideModelId) {
-            setOverrideModelId(agent.primary_model_id);
-        }
-        // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [agent?.primary_model_id, wsSessionId]);
-
-    const handleModelChange = useCallback(async (newModelId: string | null) => {
-        setOverrideModelId(newModelId);
-    }, []);
-
-    const { data: llmModels = [], isLoading: llmModelsLoading } = useQuery({
+    const { data: llmModels = [] } = useQuery({
         queryKey: ['llm-models'],
         queryFn: () => enterpriseApi.llmModels(),
-        enabled: !!agent,
-        refetchOnMount: 'always',
+        enabled: !!agent?.primary_model_id,
     });
 
-    const enabledLlmModels = (llmModels as any[]).filter((m: any) => m.enabled);
-    const effectiveChatModelId = overrideModelId
-        || agent?.primary_model_id
-        || myTenant?.default_model_id
-        || enabledLlmModels[0]?.id
-        || null;
-    const effectiveModelReady = !!effectiveChatModelId && enabledLlmModels.some((m: any) => m.id === effectiveChatModelId);
-    const supportsVision = !!effectiveChatModelId && llmModels.some(
-        (m: any) => m.id === effectiveChatModelId && m.supports_vision
+    const supportsVision = !!agent?.primary_model_id && llmModels.some(
+        (m: any) => m.id === agent.primary_model_id && m.supports_vision
     );
 
     const parseMessage = (msg: Message): Message => {
         if (msg.role !== 'user') return msg;
-
-        let result = { ...msg };
-
-        // ── Step 1: strip prefix markers to extract fileName ─────────────────
         // Standard web chat format: [file:name.pdf]\ncontent
-        const newFmt = result.content.match(/^\[file:([^\]]+)\]\n?/);
-        if (newFmt) {
-            result = { ...result, fileName: newFmt[1], content: result.content.slice(newFmt[0].length).trim() };
-        } else {
-            // Feishu/Slack channel format: [\u6587\u4ef6\u5df2\u4e0a\u4f20: workspace/uploads/name]
-            const chanFmt = result.content.match(/^\[\u6587\u4ef6\u5df2\u4e0a\u4f20: (?:workspace\/uploads\/)?([^\]\n]+)\]/);
-            if (chanFmt) {
-                const raw = chanFmt[1]; const fileName = raw.split('/').pop() || raw;
-                result = { ...result, fileName, content: result.content.slice(chanFmt[0].length).trim() };
-            } else {
-                // Old format: [File: name.pdf]\nFile location:...\nQuestion: user_msg
-                const oldFmt = result.content.match(/^\[File: ([^\]]+)\]/);
-                if (oldFmt) {
-                    const fileName = oldFmt[1];
-                    const qMatch = result.content.match(/\nQuestion: ([\s\S]+)$/);
-                    result = { ...result, fileName, content: qMatch ? qMatch[1].trim() : '' };
-                }
-            }
+        const newFmt = msg.content.match(/^\[file:([^\]]+)\]\n?/);
+        if (newFmt) return { ...msg, fileName: newFmt[1], content: msg.content.slice(newFmt[0].length).trim() };
+        // Feishu/Slack channel format: [\u6587\u4ef6\u5df2\u4e0a\u4f20: workspace/uploads/name]
+        const chanFmt = msg.content.match(/^\[\u6587\u4ef6\u5df2\u4e0a\u4f20: (?:workspace\/uploads\/)?([^\]\n]+)\]/);
+        if (chanFmt) {
+            const raw = chanFmt[1]; const fileName = raw.split('/').pop() || raw;
+            return { ...msg, fileName, content: msg.content.slice(chanFmt[0].length).trim() };
         }
-
-        // ── Step 2: strip [image_data:...] markers ───────────────────────────
-        // When a history message was saved with an inline base64 image marker
-        // (e.g. [image_data:data:image/jpeg;base64,xxx]), we must:
-        //   a) extract the data URL and use it as imageUrl for the thumbnail
-        //   b) remove the raw marker from the displayed content so base64 is
-        //      never rendered as text (also prevents layout/scroll breakage)
-        const imgDataPattern = /\[image_data:(data:image\/[^;]+;base64,[A-Za-z0-9+/=]+)\]/;
-        const imgMatch = result.content.match(imgDataPattern);
-        if (imgMatch) {
-            result = {
-                ...result,
-                // Prefer existing imageUrl (set by the live upload flow); fall back
-                // to the extracted data URL so the thumbnail shows in history.
-                imageUrl: result.imageUrl || imgMatch[1],
-                content: result.content
-                    .replace(/\[image_data:data:image\/[^;]+;base64,[A-Za-z0-9+/=]+\]\n?/g, '')
-                    .trim(),
-            };
+        // Old format: [File: name.pdf]\nFile location:...\nQuestion: user_msg
+        const oldFmt = msg.content.match(/^\[File: ([^\]]+)\]/);
+        if (oldFmt) {
+            const fileName = oldFmt[1];
+            const qMatch = msg.content.match(/\nQuestion: ([\s\S]+)$/);
+            return { ...msg, fileName, content: qMatch ? qMatch[1].trim() : '' };
         }
-
-        return result;
+        return msg;
     };
 
     // Load chat history on mount
@@ -413,12 +132,13 @@ export default function Chat() {
             .then(r => r.json())
             .then((history: any[]) => {
                 if (history.length > 0) {
-                    const processed: Message[] = [];
+                    const processed: any[] = [];
                     for (const h of history) {
                         if (h.is_hidden) {
-                            const firstLine = (h.content || '').split('\n').find((line: string) => { const trimmed = line.trim(); return trimmed && trimmed !== '---'; })?.replace(/^#\s*/, '').trim();
+                            // Reconstruct skill indicator from hidden message
+                            const firstLine = (h.content || '').split('\n')[0].replace(/^#\s*/, '').trim();
                             processed.push({
-                                role: 'assistant',
+                                role: 'assistant' as const,
                                 content: firstLine || 'Skill loaded',
                                 isSkillIndicator: true,
                                 hiddenContent: h.content,
@@ -427,59 +147,16 @@ export default function Chat() {
                             });
                             continue;
                         }
-                        if (h.role === 'tool_call') {
-                            const tc: ToolCall = {
-                                name: h.toolName || h.tool_name || '',
-                                args: h.toolArgs || h.tool_args || {},
-                                result: h.toolResult || h.tool_result || '',
-                            };
-                            const last = processed[processed.length - 1];
-                            if (last && last._isToolGroup) {
-                                last.toolCalls = [...(last.toolCalls || []), tc];
-                            } else if (last && last.role === 'assistant' && !(last.content && last.content.trim())) {
-                                last._isToolGroup = true;
-                                last.toolCalls = [...(last.toolCalls || []), tc];
-                            } else {
-                                processed.push({
-                                    role: 'assistant', content: '', toolCalls: [tc],
-                                    timestamp: h.created_at || undefined,
-                                    _isToolGroup: true,
-                                });
-                            }
-                        } else {
-                            const msg = parseMessage({ role: h.role, content: h.content, fileName: h.fileName, toolCalls: h.toolCalls, thinking: h.thinking, imageUrl: h.imageUrl });
-                            msg.id = h.id;
-                            msg.timestamp = h.created_at || undefined;
-                            processed.push(msg);
-                        }
+                        const msg = parseMessage({ role: h.role, content: h.content, fileName: h.fileName, toolCalls: h.toolCalls, thinking: h.thinking, imageUrl: h.imageUrl });
+                        msg.id = h.id;
+                        msg.timestamp = h.created_at || undefined;
+                        processed.push(msg);
                     }
                     setMessages(processed);
                 }
             })
-            .catch(() => { /* ignore */ })
-            .finally(() => { historyLoaded.current = true; });
+            .catch(() => { /* ignore */ });
     }, [id, token]);
-
-    // Per-(user, agent) onboarding kickoff: if this viewer has never been
-    // onboarded to this agent and the conversation is empty, fire a tagged
-    // trigger the backend treats as "agent greets first" — no visible user
-    // bubble, no DB write for the placeholder turn. One-shot per mount.
-    useEffect(() => {
-        if (onboardingKickoffSent.current) return;
-        if (!connected || !wsRef.current) return;
-        if (!agent || agent.onboarded_for_me !== false) return;
-        if (!historyLoaded.current) return;
-        if (llmModelsLoading || !effectiveModelReady || !effectiveChatModelId) return;
-        if (messages.length > 0) return;
-        onboardingKickoffSent.current = true;
-        setIsWaiting(true);
-        setStreaming(true);
-        wsRef.current.send(JSON.stringify({
-            content: '',
-            kind: 'onboarding_trigger',
-            model_id: effectiveChatModelId,
-        }));
-    }, [connected, agent, messages.length, llmModelsLoading, effectiveModelReady, effectiveChatModelId]);
 
     useEffect(() => {
         if (!id || !token) return;
@@ -489,8 +166,7 @@ export default function Chat() {
         const connect = () => {
             if (cancelled) return;
             const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-            const lang = (i18n.language || 'en').toLowerCase().startsWith('zh') ? 'zh' : 'en';
-            const wsUrl = `${protocol}//${window.location.host}/ws/chat/${id}?token=${token}&lang=${lang}`;
+            const wsUrl = `${protocol}//${window.location.host}/ws/chat/${id}?token=${token}`;
             const ws = new WebSocket(wsUrl);
 
             ws.onopen = () => {
@@ -519,34 +195,6 @@ export default function Chat() {
                     setStreaming(false);
                 }
 
-                // Capture session_id from the 'connected' message for Take Control
-                if (data.type === 'connected' && data.session_id) {
-                    setWsSessionId(data.session_id);
-                    return;
-                }
-
-                // ── AgentBay live preview events ──
-                if (data.type === 'agentbay_live') {
-                    console.log('[LivePreview] Received:', data.env, 'url:', data.screenshot_url?.substring(0, 60));
-                    setLiveState(prev => {
-                        const next = { ...prev };
-                        if ((data.env === 'desktop' || data.env === 'browser') && data.screenshot_url) {
-                            // Use URL-based approach: append cache-busting timestamp
-                            const imgUrl = data.screenshot_url + '&_t=' + Date.now();
-                            if (data.env === 'desktop') next.desktop = { screenshotUrl: imgUrl };
-                            else next.browser = { screenshotUrl: imgUrl };
-                        } else if (data.env === 'code' && data.output) {
-                            // Append code output
-                            const existing = prev.code?.output || '';
-                            next.code = { output: existing + (existing ? '\n---\n' : '') + data.output };
-                        }
-                        return next;
-                    });
-                    // Auto-expand the live panel on first data
-                    setLivePanelVisible(true);
-                    return;
-                }
-
                 if (data.type === 'thinking') {
                     // Accumulate thinking content
                     thinkingContent.current += data.content;
@@ -573,86 +221,8 @@ export default function Chat() {
                         return [...prev, { role: 'assistant', content: streamContent.current, timestamp: new Date().toISOString() }];
                     });
                 } else if (data.type === 'tool_call') {
-                    console.log('[ToolCall]', data.name, data.status);
-                    if (data.status === 'running') {
-                        // Tool execution started — show in-progress in tool group
-                        const tc: ToolCall = { name: data.name, args: data.args || {} };
-                        pendingToolCalls.current.push(tc);
-                        const now = new Date().toISOString();
-                        setMessages(prev => {
-                            let msgs = [...prev];
-                            // Remove trailing empty assistant messages (stream placeholders)
-                            while (msgs.length > 0) {
-                                const last = msgs[msgs.length - 1];
-                                if (last.role === 'assistant' && !last._isToolGroup && !(last.content && last.content.trim())) {
-                                    msgs.pop();
-                                } else break;
-                            }
-                            // Merge into existing tool group, but stop at user messages (new turn)
-                            for (let i = msgs.length - 1; i >= Math.max(0, msgs.length - 5); i--) {
-                                if (msgs[i].role === 'user') break;
-                                if (msgs[i]._isToolGroup) {
-                                    msgs[i] = { ...msgs[i], toolCalls: [...(msgs[i].toolCalls || []), tc], timestamp: now };
-                                    return msgs;
-                                }
-                            }
-                            return [...msgs, { role: 'assistant', content: '', toolCalls: [tc], timestamp: now, _isToolGroup: true }];
-                        });
-                    } else if (data.status === 'done') {
-                        // Tool execution finished — update result
-                        streamContent.current = '';
-                        thinkingContent.current = '';
-                        const newCall: ToolCall = { name: data.name, args: data.args, result: data.result || '' };
-                        // Update pending: replace running entry or add new
-                        const idx = pendingToolCalls.current.findIndex(tc => tc.name === data.name && !tc.result);
-                        if (idx >= 0) {
-                            pendingToolCalls.current[idx] = newCall;
-                        } else {
-                            pendingToolCalls.current.push(newCall);
-                        }
-                        const now = new Date().toISOString();
-                        setMessages(prev => {
-                            let msgs = [...prev];
-                            // Remove trailing empty assistant messages
-                            while (msgs.length > 0) {
-                                const last = msgs[msgs.length - 1];
-                                if (last.role === 'assistant' && !last._isToolGroup && !(last.content && last.content.trim())) {
-                                    msgs.pop();
-                                } else break;
-                            }
-                            // Find recent tool group, but stop at user messages (new turn)
-                            for (let i = msgs.length - 1; i >= Math.max(0, msgs.length - 5); i--) {
-                                if (msgs[i].role === 'user') break;
-                                if (msgs[i]._isToolGroup) {
-                                    // Update the matching tool call with result, or add new
-                                    const existing = (msgs[i].toolCalls || []).map(tc =>
-                                        tc.name === data.name && !tc.result ? newCall : tc
-                                    );
-                                    const hasIt = existing.some(tc => tc.name === data.name && tc.result);
-                                    msgs[i] = { ...msgs[i], toolCalls: hasIt ? existing : [...existing, newCall], timestamp: now };
-                                    return msgs;
-                                }
-                            }
-                            return [...msgs, { role: 'assistant', content: '', toolCalls: [newCall], timestamp: now, _isToolGroup: true }];
-                        });
-
-                        // ── AgentBay live preview (embedded in tool_call) ──
-                        if (data.live_preview) {
-                            const lp = data.live_preview;
-                            setLiveState(prev => {
-                                const next = { ...prev };
-                                if ((lp.env === 'desktop' || lp.env === 'browser') && lp.screenshot_url) {
-                                    const imgUrl = lp.screenshot_url + '&_t=' + Date.now();
-                                    if (lp.env === 'desktop') next.desktop = { screenshotUrl: imgUrl };
-                                    else next.browser = { screenshotUrl: imgUrl };
-                                } else if (lp.env === 'code' && lp.output) {
-                                    const existing = prev.code?.output || '';
-                                    next.code = { output: existing + (existing ? '\n---\n' : '') + lp.output };
-                                }
-                                return next;
-                            });
-                            setLivePanelVisible(true);
-                        }
+                    if (data.status === 'done') {
+                        pendingToolCalls.current.push({ name: data.name, args: data.args, result: data.result });
                     }
                 } else if (data.type === 'done') {
                     // Final response — replace streaming message with final + tool calls
@@ -686,14 +256,14 @@ export default function Chat() {
                     });
                 } else if (data.type === 'skill_loaded') {
                     setMessages(prev => [...prev, {
-                        role: 'assistant',
+                        role: 'assistant' as const,
                         content: `${data.emoji || ''} ${data.name} loaded`.trim(),
                         isSkillIndicator: true,
                         hiddenContent: data.content || null,
                     }]);
                 } else if (data.type === 'skill_error') {
                     setMessages(prev => [...prev, {
-                        role: 'assistant',
+                        role: 'assistant' as const,
                         content: `⚠️ ${data.message}`,
                         isSkillIndicator: true,
                     }]);
@@ -720,72 +290,38 @@ export default function Chat() {
         };
     }, [id, token]);
 
-    // Auto-focus input when connection is established
     useEffect(() => {
-        if (connected) {
-            setTimeout(() => inputRef.current?.focus(), 50);
-        }
-    }, [connected]);
-
-    const handleMessagesScroll = () => {
-        const el = messagesContainerRef.current;
-        if (!el) return;
-        const distFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
-        isNearBottomRef.current = distFromBottom < 120;
-        userPinnedAwayFromBottomRef.current = distFromBottom > 220;
-    };
-
-    const handleMessagesWheelCapture = (event: React.WheelEvent<HTMLDivElement>) => {
-        const el = messagesContainerRef.current;
-        if (!el) return;
-        if (event.deltaY < 0 && el.scrollTop > 0) {
-            userPinnedAwayFromBottomRef.current = true;
-            isNearBottomRef.current = false;
-        }
-    };
-
-    useEffect(() => {
-        if (userPinnedAwayFromBottomRef.current || !isNearBottomRef.current) return;
-        const el = messagesContainerRef.current;
-        if (!el) return;
-        requestAnimationFrame(() => {
-            if (userPinnedAwayFromBottomRef.current) return;
-            el.scrollTop = el.scrollHeight;
-        });
+        messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
     }, [messages]);
 
     const handleFileSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
         const file = e.target.files?.[0];
         if (!file) return;
 
-        const previewUrl = file.type.startsWith('image/') ? URL.createObjectURL(file) : undefined;
-        setUploadProgress({ name: file.name, percent: 0, previewUrl, sizeBytes: file.size });
-
+        setUploading(true);
         try {
-            const { promise } = uploadFileWithProgress(
-                '/chat/upload',
-                file,
-                (pct) => {
-                    setUploadProgress((prev) =>
-                        prev ? { ...prev, percent: pct >= 101 ? 100 : pct } : null,
-                    );
-                },
-                id ? { agent_id: id } : undefined,
-            );
-            const data = await promise;
-            setAttachedFile({
-                name: data.filename,
-                text: data.extracted_text,
-                path: data.workspace_path,
-                imageUrl: data.image_data_url || undefined,
+            const formData = new FormData();
+            formData.append('file', file);
+            if (id) formData.append('agent_id', id);
+
+            const resp = await fetch('/api/chat/upload', {
+                method: 'POST',
+                headers: { Authorization: `Bearer ${token}` },
+                body: formData,
             });
-        } catch (err: any) {
-            if (err?.message !== 'Upload cancelled') {
-                toast.error(t('agent.upload.failed'), { details: String(err?.message || '') });
+
+            if (!resp.ok) {
+                const err = await resp.json();
+                alert(err.detail || t('agent.upload.failed'));
+                return;
             }
+
+            const data = await resp.json();
+            setAttachedFile({ name: data.filename, text: data.extracted_text, path: data.workspace_path, imageUrl: data.image_data_url || undefined });
+        } catch (err) {
+            alert(t('agent.upload.failed') + ': ' + (err as Error).message);
         } finally {
-            if (previewUrl) URL.revokeObjectURL(previewUrl);
-            setUploadProgress(null);
+            setUploading(false);
             if (fileInputRef.current) fileInputRef.current.value = '';
         }
     };
@@ -798,8 +334,6 @@ export default function Chat() {
         pendingToolCalls.current = [];
         streamContent.current = '';
         thinkingContent.current = '';
-        userPinnedAwayFromBottomRef.current = false;
-        isNearBottomRef.current = true;
         setIsWaiting(true);
         setStreaming(true);
 
@@ -840,56 +374,20 @@ export default function Chat() {
             imageUrl: attachedFile?.imageUrl,
             timestamp: new Date().toISOString(),
         }]);
-        wsRef.current.send(JSON.stringify({ content: contentForLLM, display_content: userMsg, file_name: attachedFile?.name || '', model_id: effectiveChatModelId }));
+        wsRef.current.send(JSON.stringify({ content: contentForLLM, display_content: userMsg, file_name: attachedFile?.name || '' }));
         setInput('');
         setAttachedFile(null);
     };
 
-    const hasLiveData = !!(liveState.desktop || liveState.browser || liveState.code);
-
-    // ── Drag-and-drop file upload ──
-    const handleDroppedFiles = useCallback(async (files: File[]) => {
-        const file = files[0]; // Chat supports single file
-        if (!file) return;
-
-        const previewUrl = file.type.startsWith('image/') ? URL.createObjectURL(file) : undefined;
-        setUploadProgress({ name: file.name, percent: 0, previewUrl, sizeBytes: file.size });
-
-        try {
-            const { promise } = uploadFileWithProgress(
-                '/chat/upload',
-                file,
-                (pct) => {
-                    setUploadProgress((prev) =>
-                        prev ? { ...prev, percent: pct >= 101 ? 100 : pct } : null,
-                    );
-                },
-                id ? { agent_id: id } : undefined,
-            );
-            const data = await promise;
-            setAttachedFile({
-                name: data.filename,
-                text: data.extracted_text,
-                path: data.workspace_path,
-                imageUrl: data.image_data_url || undefined,
-            });
-        } catch (err: any) {
-            if (err?.message !== 'Upload cancelled') {
-                toast.error(t('agent.upload.failed'), { details: String(err?.message || '') });
-            }
-        } finally {
-            if (previewUrl) URL.revokeObjectURL(previewUrl);
-            setUploadProgress(null);
+    const handleKeyDown = (e: React.KeyboardEvent) => {
+        if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
+            e.preventDefault();
+            sendMessage();
         }
-    }, [id, t]);
-
-    const { isDragging: isChatDragging, dropZoneProps: chatDropProps } = useDropZone({
-        onDrop: handleDroppedFiles,
-        disabled: !connected || !!uploadProgress || isWaiting || streaming,
-    });
+    };
 
     return (
-        <div style={{ display: 'flex', flexDirection: 'column', height: '100%', overflow: 'hidden' }}>
+        <div>
             <style>{`.message-row:hover .edit-btn { opacity: 1 !important; }`}</style>
             <div className="page-header">
                 <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
@@ -906,22 +404,8 @@ export default function Chat() {
                 </div>
             </div>
 
-            <div className={`chat-container ${hasLiveData ? 'chat-with-live-panel' : ''}`} {...chatDropProps} style={{ position: 'relative' }}>
-                {/* Drop overlay */}
-                {isChatDragging && (
-                    <div className="drop-zone-overlay">
-                        <div className="drop-zone-overlay__icon"><IconPaperclip size={28} stroke={1.8} /></div>
-                        <div className="drop-zone-overlay__text">{t('agent.upload.dropToAttach', 'Drop file to attach')}</div>
-                    </div>
-                )}
-                {/* Wrap chat area in a column so it coexists with the live panel in flex-row */}
-                <div className="chat-main">
-                <div
-                    ref={messagesContainerRef}
-                    className="chat-messages"
-                    onScroll={handleMessagesScroll}
-                    onWheelCapture={handleMessagesWheelCapture}
-                >
+            <div className="chat-container">
+                <div className="chat-messages">
                     {messages.length === 0 && (
                         <div style={{ textAlign: 'center', padding: '60px', color: 'var(--text-tertiary)' }}>
                             <div style={{ marginBottom: '12px', display: 'flex', justifyContent: 'center' }}>{Icons.chat}</div>
@@ -929,11 +413,7 @@ export default function Chat() {
                             <div style={{ fontSize: '12px', marginTop: '8px', opacity: 0.7 }}>{t('agent.chat.fileSupport')}</div>
                         </div>
                     )}
-                    {messages.filter(m => {
-                        // Skip empty assistant messages (stream placeholders)
-                        if (m.role === 'assistant' && !m._isToolGroup && !(m.content && m.content.trim()) && !m.toolCalls?.length && !m.thinking) return false;
-                        return true;
-                    }).map((msg, i) => (
+                    {messages.map((msg, i) => (
                         msg.isSkillIndicator ? (
                             <div key={i} style={{ textAlign: 'center', color: 'var(--text-tertiary)', fontSize: '12px', padding: '4px 0', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '6px' }}>
                                 <span>{msg.content}</span>
@@ -949,14 +429,7 @@ export default function Chat() {
                                     </button>
                                 )}
                             </div>
-                        ) : msg._isToolGroup ? (
-                            /* Tool call group — compact display without avatar bubble */
-                            <div key={i} style={{ marginLeft: '48px', marginBottom: '8px' }}>
-                                {msg.toolCalls && msg.toolCalls.length > 0 && (
-                                    <ChatToolChain toolCalls={msg.toolCalls} />
-                                )}
-                            </div>
-                        ) :
+                        ) : (
                         <div key={i} className={`chat-message ${msg.role} message-row`}>
                             <div className="chat-avatar" style={{ color: 'var(--text-tertiary)' }}>
                                 {msg.role === 'user' ? Icons.user : Icons.bot}
@@ -970,26 +443,75 @@ export default function Chat() {
                                             <img src={msg.imageUrl} alt={msg.fileName} style={{ maxWidth: '240px', maxHeight: '180px', borderRadius: '8px', border: '1px solid var(--border-subtle)' }} />
                                         </div>);
                                     }
-                                    return (<div style={{ display: 'inline-flex', alignItems: 'center', gap: '5px', background: 'rgba(0,0,0,0.08)', borderRadius: '6px', padding: '4px 8px', marginBottom: msg.content ? '4px' : '0', fontSize: '11px', border: '1px solid var(--border-subtle)', color: 'var(--text-secondary)' }}><IconPaperclip size={13} stroke={1.8} /><span style={{ fontWeight: 500, color: 'var(--text-primary)', maxWidth: '200px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{msg.fileName}</span></div>);
+                                    const fi = fe === 'pdf' ? '\uD83D\uDCC4' : (fe === 'csv' || fe === 'xlsx' || fe === 'xls') ? '\uD83D\uDCCA' : (fe === 'docx' || fe === 'doc') ? '\uD83D\uDCDD' : '\uD83D\uDCCE';
+                                    return (<div style={{ display: 'inline-flex', alignItems: 'center', gap: '5px', background: 'rgba(0,0,0,0.08)', borderRadius: '6px', padding: '4px 8px', marginBottom: msg.content ? '4px' : '0', fontSize: '11px', border: '1px solid var(--border-subtle)', color: 'var(--text-secondary)' }}><span>{fi}</span><span style={{ fontWeight: 500, color: 'var(--text-primary)', maxWidth: '200px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{msg.fileName}</span></div>);
                                 })()}
                                 {msg.thinking && (
-                                    <details className="thinking-panel">
-                                        <summary className="thinking-summary">
-                                            <span className="thinking-status-dot" />
-                                            {streaming && i === messages.length - 1 && !msg.content
-                                                ? t('agent.chat.thinkingLabel', '思考中')
-                                                : t('agent.chat.thoughtLabel', '已思考')}
+                                    <details style={{
+                                        marginBottom: '8px', fontSize: '12px',
+                                        background: 'rgba(147, 130, 220, 0.08)', borderRadius: '6px',
+                                        border: '1px solid rgba(147, 130, 220, 0.15)',
+                                    }}>
+                                        <summary style={{
+                                            padding: '6px 10px', cursor: 'pointer',
+                                            color: 'rgba(147, 130, 220, 0.9)', fontWeight: 500,
+                                            userSelect: 'none', display: 'flex', alignItems: 'center', gap: '4px',
+                                        }}>
+                                            💭 Thinking
                                         </summary>
-                                        <div className="thinking-content">
+                                        <div style={{
+                                            padding: '4px 10px 8px',
+                                            fontSize: '12px', lineHeight: '1.6',
+                                            color: 'var(--text-secondary)',
+                                            whiteSpace: 'pre-wrap', wordBreak: 'break-word',
+                                            maxHeight: '300px', overflow: 'auto',
+                                        }}>
                                             {msg.thinking}
                                         </div>
                                     </details>
                                 )}
                                 {msg.toolCalls && msg.toolCalls.length > 0 && (
-                                    <ChatToolChain toolCalls={msg.toolCalls} />
+                                    <details style={{
+                                        marginBottom: '8px', fontSize: '12px',
+                                        background: 'var(--accent-subtle)', borderRadius: '6px',
+                                        padding: '0',
+                                    }}>
+                                        <summary style={{
+                                            padding: '6px 10px', cursor: 'pointer',
+                                            color: 'var(--accent-text)', fontWeight: 500,
+                                            userSelect: 'none',
+                                        }}>
+                                            {Icons.tool} {msg.toolCalls.length} tool call{msg.toolCalls.length > 1 ? 's' : ''}
+                                        </summary>
+                                        <div style={{ padding: '4px 10px 8px' }}>
+                                            {msg.toolCalls.map((tc, j) => (
+                                                <div key={j} style={{
+                                                    marginBottom: j < msg.toolCalls!.length - 1 ? '6px' : 0,
+                                                    borderBottom: j < msg.toolCalls!.length - 1 ? '1px solid var(--border-subtle)' : 'none',
+                                                    paddingBottom: j < msg.toolCalls!.length - 1 ? '6px' : 0,
+                                                }}>
+                                                    <div style={{ fontWeight: 600, color: 'var(--accent-text)', marginBottom: '2px' }}>
+                                                        {tc.name}
+                                                    </div>
+                                                    <div style={{ fontFamily: 'var(--font-mono)', fontSize: '11px', color: 'var(--text-tertiary)', whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}>
+                                                        {JSON.stringify(tc.args)}
+                                                    </div>
+                                                    {tc.result && (
+                                                        <div style={{
+                                                            marginTop: '4px', fontSize: '11px', color: 'var(--text-secondary)',
+                                                            fontFamily: 'var(--font-mono)', whiteSpace: 'pre-wrap', wordBreak: 'break-all',
+                                                            maxHeight: '120px', overflow: 'auto',
+                                                        }}>
+                                                            {tc.result}
+                                                        </div>
+                                                    )}
+                                                </div>
+                                            ))}
+                                        </div>
+                                    </details>
                                 )}
                                 {msg.role === 'assistant' ? (
-                                    streaming && !msg.content && !msg.thinking && i === messages.length - 1 ? (
+                                    streaming && !msg.content && i === messages.length - 1 ? (
                                         <div className="thinking-indicator">
                                             <div className="thinking-dots">
                                                 <span /><span /><span />
@@ -1019,9 +541,7 @@ export default function Chat() {
                                     </div>
                                 ) : (
                                     <div style={{ display: 'flex', alignItems: 'flex-start', gap: '6px' }}>
-                                        <div style={{ flex: 1 }}>
-                                            <MarkdownRenderer content={msg.content} />
-                                        </div>
+                                        <div style={{ whiteSpace: 'pre-wrap', flex: 1 }}>{msg.content}</div>
                                         {msg.role === 'user' && !msg.isSkillIndicator && msg.id && (
                                             <button
                                                 onClick={() => {
@@ -1053,6 +573,7 @@ export default function Chat() {
                                 )}
                             </div>
                         </div>
+                        )
                     ))}
                     {(isWaiting || (streaming && (messages.length === 0 || messages[messages.length - 1].role === 'user'))) && (
                         <div className="chat-message assistant">
@@ -1072,132 +593,67 @@ export default function Chat() {
                     <div ref={messagesEndRef} />
                 </div>
 
-                <div className="chat-input-area">
-                    <div className="chat-composer">
-                        {(uploadProgress || (attachedFile && !uploadProgress)) && (
-                            <div className="chat-composer-attachments">
-                                {uploadProgress && (
-                                    <div className="chat-file-pill">
-                                        <div
-                                            className="chat-file-pill__fill"
-                                            style={{ width: `${uploadProgress.percent}%` }}
-                                        />
-                                        <div className="chat-file-pill__row">
-                                            {uploadProgress.previewUrl ? (
-                                                <img className="chat-file-pill__thumb" src={uploadProgress.previewUrl} alt="" />
-                                            ) : (
-                                                <span className="chat-file-pill__icon">
-                                                    <IconPaperclip size={14} stroke={1.75} />
-                                                </span>
-                                            )}
-                                            <span className="chat-file-pill__name">{uploadProgress.name}</span>
-                                            <span className="chat-file-pill__size">{formatFileSize(uploadProgress.sizeBytes)}</span>
-                                            <span className="chat-file-pill__pct">{uploadProgress.percent}%</span>
-                                        </div>
-                                    </div>
-                                )}
-                                {attachedFile && !uploadProgress && (
-                                    <div className="chat-file-pill">
-                                        <div className="chat-file-pill__row">
-                                            {attachedFile.imageUrl ? (
-                                                <img className="chat-file-pill__thumb" src={attachedFile.imageUrl} alt="" />
-                                            ) : (
-                                                <span className="chat-file-pill__icon">
-                                                    <IconPaperclip size={14} stroke={1.75} />
-                                                </span>
-                                            )}
-                                            <span className="chat-file-pill__name">{attachedFile.name}</span>
-                                            <button
-                                                type="button"
-                                                className="chat-file-pill__remove"
-                                                onClick={() => setAttachedFile(null)}
-                                                title={t('common.close', 'Close')}
-                                            >
-                                                ×
-                                            </button>
-                                        </div>
-                                    </div>
-                                )}
-                            </div>
-                        )}
-                        <div className="chat-composer-input-block">
-                            <SkillAutocomplete
-                                value={input}
-                                onChange={setInput}
-                                onSubmit={sendMessage}
-                                skillMap={agent?.skill_map || {}}
-                                placeholder={attachedFile ? t('agent.chat.askAboutFile', { name: attachedFile.name }) : t('chat.placeholder')}
-                                className="chat-input"
-                                disabled={!connected || isWaiting || streaming}
-                                inputRef={inputRef}
-                            />
-                        </div>
-                        <div className="chat-composer-toolbar">
-                            <input type="file" ref={fileInputRef} onChange={handleFileSelect} style={{ display: 'none' }} />
-                            <button
-                                type="button"
-                                className="chat-composer-btn"
-                                onClick={() => fileInputRef.current?.click()}
-                                disabled={!connected || !!uploadProgress || isWaiting || streaming}
-                                title={t('agent.workspace.uploadFile')}
-                            >
-                                <IconPaperclip size={16} stroke={1.75} />
-                            </button>
-                            <ModelSwitcher
-                                value={overrideModelId}
-                                onChange={handleModelChange}
-                                tenantDefaultId={myTenant?.default_model_id || null}
-                                disabled={!connected}
-                            />
-                            <div style={{ flex: 1 }} />
-                            {(streaming || isWaiting) ? (
-                                <button
-                                    type="button"
-                                    className="btn btn-stop-generation"
-                                    onClick={() => {
-                                        if (wsRef.current?.readyState === WebSocket.OPEN) {
-                                            wsRef.current.send(JSON.stringify({ type: 'abort' }));
-                                            setStreaming(false);
-                                            setIsWaiting(false);
-                                        }
-                                    }}
-                                    title={t('chat.stop', 'Stop')}
-                                >
-                                    <span className="stop-icon" />
-                                </button>
+                {attachedFile && (
+                    <div style={{
+                        padding: '6px 12px',
+                        background: 'var(--bg-elevated)',
+                        borderTop: '1px solid var(--border-subtle)',
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'space-between',
+                        fontSize: '12px',
+                    }}>
+                        <span style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                            {attachedFile.imageUrl ? (
+                                <img src={attachedFile.imageUrl} alt={attachedFile.name} style={{ width: '32px', height: '32px', borderRadius: '4px', objectFit: 'cover' }} />
                             ) : (
-                                <button
-                                    type="button"
-                                    className="btn btn-primary chat-composer-send"
-                                    onClick={sendMessage}
-                                    disabled={!connected || (!input.trim() && !attachedFile)}
-                                    title={t('chat.send')}
-                                >
-                                    <IconSend size={16} stroke={1.75} />
-                                </button>
+                                <span style={{ display: 'flex' }}>{Icons.clip}</span>
                             )}
-                        </div>
+                            {attachedFile.name}
+                        </span>
+                        <button
+                            onClick={() => setAttachedFile(null)}
+                            style={{ background: 'none', border: 'none', color: 'var(--text-tertiary)', cursor: 'pointer', fontSize: '14px' }}
+                        >✕</button>
                     </div>
-                </div>
-                </div>
-
-                {/* AgentBay Live Preview Panel */}
-                {hasLiveData && (
-                    <AgentBayLivePanel
-                        liveState={liveState}
-                        visible={livePanelVisible}
-                        onToggle={() => setLivePanelVisible(v => !v)}
-                        agentId={id}
-                        sessionId={wsSessionId}
-                        onLiveUpdate={(env, screenshotDataUri) => {
-                            // Update live preview with the latest screenshot from Take Control
-                            setLiveState(prev => ({
-                                ...prev,
-                                [env]: { screenshotUrl: screenshotDataUri },
-                            }));
-                        }}
-                    />
                 )}
+
+                <div className="chat-input-area">
+                    <input
+                        type="file"
+                        ref={fileInputRef}
+                        onChange={handleFileSelect}
+                        style={{ display: 'none' }}
+
+                    />
+                    <button
+                        className="btn btn-secondary"
+                        onClick={() => fileInputRef.current?.click()}
+                        disabled={!connected || uploading || isWaiting || streaming}
+                        style={{ padding: '8px 12px', fontSize: '16px', minWidth: 'auto' }}
+                        title={t('agent.workspace.uploadFile')}
+                    >
+                        {uploading ? Icons.loader : Icons.clip}
+                    </button>
+                    <SkillAutocomplete
+                        value={input}
+                        onChange={setInput}
+                        onSubmit={sendMessage}
+                        skillMap={agent?.skill_map || {}}
+                        placeholder={attachedFile ? t('agent.chat.askAboutFile', { name: attachedFile.name }) : t('chat.placeholder')}
+                        className="chat-input"
+                        disabled={!connected || isWaiting || streaming}
+                    />
+                    {(streaming || isWaiting) ? (
+                        <button className="btn btn-stop-generation" onClick={() => { if (wsRef.current?.readyState === WebSocket.OPEN) { wsRef.current.send(JSON.stringify({ type: 'abort' })); setStreaming(false); setIsWaiting(false); } }} title={t('chat.stop', 'Stop')}>
+                            <span className="stop-icon" />
+                        </button>
+                    ) : (
+                        <button className="btn btn-primary" onClick={sendMessage} disabled={!connected || (!input.trim() && !attachedFile)}>
+                            {t('chat.send')}
+                        </button>
+                    )}
+                </div>
             </div>
 
             {drawerContent && (

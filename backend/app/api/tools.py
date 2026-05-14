@@ -2,7 +2,7 @@
 
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy import String, cast, select, delete, or_
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -12,12 +12,9 @@ from app.database import get_db
 from app.models.tool import Tool, AgentTool
 from app.models.user import User
 from app.services.tool_config import (
-    SENSITIVE_FIELD_KEYS,
-    delete_tenant_tool_config,
     decrypt_sensitive_fields,
     encrypt_sensitive_fields,
     get_sensitive_keys,
-    get_tenant_tool_config,
     get_tool_company_config,
     mask_sensitive_fields,
     meaningful_config,
@@ -161,7 +158,7 @@ async def list_tools(
     target_tenant_id = _resolve_target_tenant_id(current_user, tenant_id)
     if target_tenant_id:
         from sqlalchemy import or_ as _or
-        query = query.where(_or(Tool.tenant_id == None, Tool.tenant_id == target_tenant_id))
+        query = query.where(_or(Tool.tenant_id is None, Tool.tenant_id == target_tenant_id))
     result = await db.execute(query)
     tools = result.scalars().all()
     response = []
@@ -333,7 +330,7 @@ async def get_agent_tools(
     # All tools visible within this agent's tenant boundary
     all_tools_r = await db.execute(
         select(Tool)
-        .where(Tool.enabled == True, _agent_visible_tool_clause(agent_obj.tenant_id, assignments))
+        .where(Tool.enabled, _agent_visible_tool_clause(agent_obj.tenant_id, assignments))
         .order_by(Tool.category, Tool.name)
     )
     all_tools = all_tools_r.scalars().all()
@@ -686,7 +683,7 @@ async def get_agent_tools_with_config(
     assignments = await _load_agent_tool_assignments(db, agent_id)
     all_tools_r = await db.execute(
         select(Tool)
-        .where(Tool.enabled == True, _agent_visible_tool_clause(agent_obj2.tenant_id, assignments))
+        .where(Tool.enabled, _agent_visible_tool_clause(agent_obj2.tenant_id, assignments))
         .order_by(Tool.category, Tool.name)
     )
     all_tools = all_tools_r.scalars().all()
@@ -828,7 +825,7 @@ async def get_category_config(
     all_cat_tools = await db.execute(
         select(Tool).where(
             Tool.category == category,
-            Tool.enabled == True,
+            Tool.enabled,
             _agent_visible_tool_clause(agent.tenant_id, await _load_agent_tool_assignments(db, agent_id)),
         ).order_by((Tool.name != primary_tool_name) if primary_tool_name else Tool.name, Tool.name)
     )

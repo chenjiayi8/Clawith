@@ -1,5 +1,3 @@
-import uuid
-
 from app.api.websocket import _rewrite_edited_user_content, _should_generate_session_title
 
 

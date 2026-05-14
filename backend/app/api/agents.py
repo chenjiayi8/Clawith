@@ -30,7 +30,7 @@ async def _get_active_admin_users(db: AsyncSession, tenant_id: uuid.UUID | None)
     result = await db.execute(
         select(User).where(
             User.tenant_id == tenant_id,
-            User.is_active.is_(True),
+            User.is_active == True,  # noqa: E712
             User.role.in_(["platform_admin", "org_admin"]),
         )
     )
@@ -741,7 +741,7 @@ async def get_agent_permission_candidates(
     if access_level != "manage":
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only manager can change permissions")
 
-    user_query = select(User).where(User.tenant_id == agent.tenant_id, User.is_active.is_(True))
+    user_query = select(User).where(User.tenant_id == agent.tenant_id, User.is_active)
     if search:
         pattern = f"%{search}%"
         user_query = user_query.where(

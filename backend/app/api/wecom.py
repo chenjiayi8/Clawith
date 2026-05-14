@@ -131,7 +131,7 @@ async def serve_wecom_verify_file(
     result = await db.execute(
         select(IdentityProvider).where(
             IdentityProvider.provider_type == "wecom",
-            IdentityProvider.is_active == True,
+            IdentityProvider.is_active,
         )
     )
     providers = result.scalars().all()
@@ -260,9 +260,11 @@ async def get_wecom_channel(
     if not config:
         raise HTTPException(status_code=404, detail="WeCom not configured")
 
+    from app.services.wecom_stream import wecom_stream_manager as runtime_wecom_stream_manager
+
     config_out = ChannelConfigOut.model_validate(config)
     if (config.extra_config or {}).get("connection_mode") == "websocket":
-        config_out.is_connected = wecom_stream_manager.status().get(str(agent_id), False)
+        config_out.is_connected = runtime_wecom_stream_manager.status().get(str(agent_id), False)
     else:
         config_out.is_connected = False
     return config_out
@@ -296,7 +298,9 @@ async def delete_wecom_channel(
     config = result.scalar_one_or_none()
     if not config:
         raise HTTPException(status_code=404, detail="WeCom not configured")
-    await wecom_stream_manager.stop_client(agent_id)
+    from app.services.wecom_stream import wecom_stream_manager as runtime_wecom_stream_manager
+
+    await runtime_wecom_stream_manager.stop_client(agent_id)
     await db.delete(config)
 
 
@@ -681,8 +685,8 @@ async def wecom_callback(
         raise HTTPException(status_code=404, detail="WeCom provider not configured for this tenant")
 
     config = provider.config
-    corp_id = config.get("app_id") or config.get("corp_id")
-    secret = config.get("app_secret") or config.get("secret")
+    config.get("app_id") or config.get("corp_id")
+    config.get("app_secret") or config.get("secret")
 
     # 2. Extract user info and login/register via RegistrationService
     try:

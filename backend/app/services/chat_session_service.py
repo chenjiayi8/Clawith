@@ -25,8 +25,8 @@ async def get_primary_platform_session(
             ChatSession.agent_id == agent_id,
             ChatSession.user_id == user_id,
             ChatSession.source_channel == "web",
-            ChatSession.is_group == False,
-            ChatSession.is_primary == True,
+            ChatSession.is_group.is_(False),
+            ChatSession.is_primary.is_(True),
         )
         .limit(1)
     )
@@ -68,7 +68,7 @@ async def ensure_primary_platform_session(
             ChatSession.agent_id == agent_id,
             ChatSession.user_id == user_id,
             ChatSession.source_channel == "web",
-            ChatSession.is_group == False,
+            ChatSession.is_group.is_(False),
         )
         .order_by(
             case((func.coalesce(user_message_count.c.user_msg_count, 0) > 0, 0), else_=1),

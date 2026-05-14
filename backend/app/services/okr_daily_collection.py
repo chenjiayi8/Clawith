@@ -149,7 +149,7 @@ async def trigger_daily_collection_for_tenant(tenant_id: uuid.UUID) -> dict:
     sent_agents = 0
 
     for _, org_member in rel_rows:
-        platform_uid = member_user_ids.get(org_member.id)
+        member_user_ids.get(org_member.id)
         platform_name = member_user_display_names.get(org_member.id)
         message_text = _human_request_message(org_member.name, report_day)
         has_external_channel = bool(org_member.open_id or org_member.external_id)

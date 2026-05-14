@@ -2383,214 +2383,6 @@ BUILTIN_TOOLS = [
         "config": {},
         "config_schema": {},
     },
-    # --- Workspace: build requests and deployment ---
-    {
-        "name": "request_build",
-        "display_name": "Request Build",
-        "description": "Create a build request for the Software Engineer agent. Any agent or human can use this to request a new website, tool, or application to be built and deployed.",
-        "category": "workspace",
-        "icon": "🔨",
-        "is_default": True,
-        "parameters_schema": {
-            "type": "object",
-            "properties": {
-                "slug": {
-                    "type": "string",
-                    "description": "URL-friendly project identifier (lowercase, hyphens allowed, 2-50 chars). This becomes the URL path: /workspace/{slug}/",
-                },
-                "name": {
-                    "type": "string",
-                    "description": "Human-readable project name",
-                },
-                "description": {
-                    "type": "string",
-                    "description": "Detailed description of what to build, including requirements, target audience, and any design preferences",
-                },
-            },
-            "required": ["slug", "name", "description"],
-        },
-        "config": {},
-        "config_schema": {},
-    },
-    {
-        "name": "list_build_requests",
-        "display_name": "List Build Requests",
-        "description": "List pending build requests (status=requested) for the Software Engineer agent to pick up.",
-        "category": "workspace",
-        "icon": "📋",
-        "is_default": True,
-        "parameters_schema": {
-            "type": "object",
-            "properties": {},
-        },
-        "config": {},
-        "config_schema": {},
-    },
-    {
-        "name": "deploy_static",
-        "display_name": "Deploy Static Site",
-        "description": "Deploy a static website (HTML/CSS/JS) from your workspace to the public workspace. Goes live immediately without approval. The files will be served at /workspace/{slug}/.",
-        "category": "workspace",
-        "icon": "🚀",
-        "is_default": True,
-        "parameters_schema": {
-            "type": "object",
-            "properties": {
-                "slug": {
-                    "type": "string",
-                    "description": "Project slug (must match an existing build request or be a new unique slug)",
-                },
-                "source_dir": {
-                    "type": "string",
-                    "description": "Directory in your workspace containing the built files (e.g., 'workspace/my-project'). Must contain at least an index.html.",
-                },
-            },
-            "required": ["slug", "source_dir"],
-        },
-        "config": {},
-        "config_schema": {},
-    },
-    {
-        "name": "request_container_deploy",
-        "display_name": "Request Container Deploy",
-        "description": "Submit a container-based application for deployment. Requires Frank's approval before going live. The application will be built from a Dockerfile in your workspace.",
-        "category": "workspace",
-        "icon": "📦",
-        "is_default": True,
-        "parameters_schema": {
-            "type": "object",
-            "properties": {
-                "slug": {
-                    "type": "string",
-                    "description": "Project slug for the URL path /workspace/{slug}/",
-                },
-                "dockerfile_path": {
-                    "type": "string",
-                    "description": "Path to the Dockerfile in your workspace (e.g., 'workspace/my-app/Dockerfile')",
-                },
-                "port": {
-                    "type": "integer",
-                    "description": "Port the application listens on inside the container",
-                },
-                "name": {
-                    "type": "string",
-                    "description": "Human-readable project name",
-                },
-                "description": {
-                    "type": "string",
-                    "description": "What this application does",
-                },
-                "resource_limits_suggestion": {
-                    "type": "object",
-                    "description": "Suggested resource limits (optional). Frank will set final limits at approval.",
-                    "properties": {
-                        "memory": {"type": "string", "description": "e.g., '256m', '512m'"},
-                        "cpus": {"type": "string", "description": "e.g., '0.5', '1'"},
-                    },
-                },
-            },
-            "required": ["slug", "dockerfile_path", "port", "name", "description"],
-        },
-        "config": {},
-        "config_schema": {},
-    },
-    {
-        "name": "list_workspace_projects",
-        "display_name": "List Workspace Projects",
-        "description": "List all workspace projects with their current status, deploy type, and URLs.",
-        "category": "workspace",
-        "icon": "📋",
-        "is_default": True,
-        "parameters_schema": {
-            "type": "object",
-            "properties": {},
-        },
-        "config": {},
-        "config_schema": {},
-    },
-    {
-        "name": "undeploy_project",
-        "display_name": "Undeploy Project",
-        "description": "Remove a deployed workspace project. For static sites, deletes files. For containers, stops and removes the container.",
-        "category": "workspace",
-        "icon": "🗑️",
-        "is_default": True,
-        "parameters_schema": {
-            "type": "object",
-            "properties": {
-                "slug": {
-                    "type": "string",
-                    "description": "The project slug to undeploy",
-                },
-            },
-            "required": ["slug"],
-        },
-        "config": {},
-        "config_schema": {},
-    },
-    {
-        "name": "get_bug_reports",
-        "display_name": "Get Bug Reports",
-        "description": "List open bug reports for workspace projects. Use this to find issues that need fixing.",
-        "category": "workspace",
-        "icon": "🐛",
-        "is_default": True,
-        "parameters_schema": {
-            "type": "object",
-            "properties": {
-                "status_filter": {
-                    "type": "string",
-                    "description": "Filter by status: 'open', 'investigating', 'escalated', or 'all'. Default: 'open'",
-                },
-            },
-        },
-        "config": {},
-        "config_schema": {},
-    },
-    {
-        "name": "resolve_bug",
-        "display_name": "Resolve Bug",
-        "description": "Mark a bug report as fixed after you have redeployed the fix.",
-        "category": "workspace",
-        "icon": "✅",
-        "is_default": True,
-        "parameters_schema": {
-            "type": "object",
-            "properties": {
-                "bug_report_id": {
-                    "type": "string",
-                    "description": "The UUID of the bug report to resolve",
-                },
-            },
-            "required": ["bug_report_id"],
-        },
-        "config": {},
-        "config_schema": {},
-    },
-    {
-        "name": "report_workspace_bug",
-        "display_name": "Report Workspace Bug",
-        "description": "Report a bug on a deployed workspace project. Creates a bug report for the Software Engineer agent to investigate and fix.",
-        "category": "workspace",
-        "icon": "🐞",
-        "is_default": True,
-        "parameters_schema": {
-            "type": "object",
-            "properties": {
-                "slug": {
-                    "type": "string",
-                    "description": "The project slug with the bug",
-                },
-                "description": {
-                    "type": "string",
-                    "description": "Detailed description of the bug, including steps to reproduce if possible",
-                },
-            },
-            "required": ["slug", "description"],
-        },
-        "config": {},
-        "config_schema": {},
-    },
     # --- Skill Management ---
     {
         "name": "search_clawhub",
@@ -3399,9 +3191,182 @@ OKR_BUILTIN_TOOLS = [
     },
 ]
 
+WORKSPACE_BUILTIN_TOOLS = [
+    {
+        "name": "request_build",
+        "display_name": "Request Build",
+        "description": "Create a build request for the Software Engineer agent. Any agent or human can use this to request a new website, tool, or application to be built and deployed.",
+        "category": "workspace",
+        "icon": "🔨",
+        "is_default": True,
+        "parameters_schema": {
+            "type": "object",
+            "properties": {
+                "slug": {
+                    "type": "string",
+                    "description": "URL-friendly project identifier (lowercase, hyphens allowed, 2-50 chars). This becomes the URL path: /workspace/{slug}/",
+                },
+                "name": {"type": "string", "description": "Human-readable project name"},
+                "description": {
+                    "type": "string",
+                    "description": "Detailed description of what to build, including requirements, target audience, and any design preferences",
+                },
+            },
+            "required": ["slug", "name", "description"],
+        },
+        "config": {},
+        "config_schema": {},
+    },
+    {
+        "name": "list_build_requests",
+        "display_name": "List Build Requests",
+        "description": "List pending build requests (status=requested) for the Software Engineer agent to pick up.",
+        "category": "workspace",
+        "icon": "📋",
+        "is_default": True,
+        "parameters_schema": {"type": "object", "properties": {}},
+        "config": {},
+        "config_schema": {},
+    },
+    {
+        "name": "deploy_static",
+        "display_name": "Deploy Static Site",
+        "description": "Deploy a static website (HTML/CSS/JS) from your workspace to the public workspace. Goes live immediately without approval. The files will be served at /workspace/{slug}/.",
+        "category": "workspace",
+        "icon": "🚀",
+        "is_default": True,
+        "parameters_schema": {
+            "type": "object",
+            "properties": {
+                "slug": {"type": "string", "description": "Project slug (must match an existing build request or be a new unique slug)"},
+                "source_dir": {
+                    "type": "string",
+                    "description": "Directory in your workspace containing the built files (e.g., 'workspace/my-project'). Must contain at least an index.html.",
+                },
+            },
+            "required": ["slug", "source_dir"],
+        },
+        "config": {},
+        "config_schema": {},
+    },
+    {
+        "name": "request_container_deploy",
+        "display_name": "Request Container Deploy",
+        "description": "Submit a container-based application for deployment. Requires Frank's approval before going live. The application will be built from a Dockerfile in your workspace.",
+        "category": "workspace",
+        "icon": "📦",
+        "is_default": True,
+        "parameters_schema": {
+            "type": "object",
+            "properties": {
+                "slug": {"type": "string", "description": "Project slug for the URL path /workspace/{slug}/"},
+                "dockerfile_path": {"type": "string", "description": "Path to the Dockerfile in your workspace (e.g., 'workspace/my-app/Dockerfile')"},
+                "port": {"type": "integer", "description": "Port the application listens on inside the container"},
+                "name": {"type": "string", "description": "Human-readable project name"},
+                "description": {"type": "string", "description": "What this application does"},
+                "resource_limits_suggestion": {
+                    "type": "object",
+                    "description": "Suggested resource limits (optional). Frank will set final limits at approval.",
+                    "properties": {
+                        "memory": {"type": "string", "description": "e.g., '256m', '512m'"},
+                        "cpus": {"type": "string", "description": "e.g., '0.5', '1'"},
+                    },
+                },
+            },
+            "required": ["slug", "dockerfile_path", "port", "name", "description"],
+        },
+        "config": {},
+        "config_schema": {},
+    },
+    {
+        "name": "list_workspace_projects",
+        "display_name": "List Workspace Projects",
+        "description": "List all workspace projects with their current status, deploy type, and URLs.",
+        "category": "workspace",
+        "icon": "📋",
+        "is_default": True,
+        "parameters_schema": {"type": "object", "properties": {}},
+        "config": {},
+        "config_schema": {},
+    },
+    {
+        "name": "undeploy_project",
+        "display_name": "Undeploy Project",
+        "description": "Remove a deployed workspace project. For static sites, deletes files. For containers, stops and removes the container.",
+        "category": "workspace",
+        "icon": "🗑️",
+        "is_default": True,
+        "parameters_schema": {
+            "type": "object",
+            "properties": {"slug": {"type": "string", "description": "The project slug to undeploy"}},
+            "required": ["slug"],
+        },
+        "config": {},
+        "config_schema": {},
+    },
+    {
+        "name": "get_bug_reports",
+        "display_name": "Get Bug Reports",
+        "description": "List open bug reports for workspace projects. Use this to find issues that need fixing.",
+        "category": "workspace",
+        "icon": "🐛",
+        "is_default": True,
+        "parameters_schema": {
+            "type": "object",
+            "properties": {
+                "status_filter": {
+                    "type": "string",
+                    "description": "Filter by status: 'open', 'investigating', 'escalated', or 'all'. Default: 'open'",
+                },
+            },
+        },
+        "config": {},
+        "config_schema": {},
+    },
+    {
+        "name": "resolve_bug",
+        "display_name": "Resolve Bug",
+        "description": "Mark a bug report as fixed after you have redeployed the fix.",
+        "category": "workspace",
+        "icon": "✅",
+        "is_default": True,
+        "parameters_schema": {
+            "type": "object",
+            "properties": {
+                "bug_report_id": {"type": "string", "description": "The UUID of the bug report to resolve"},
+            },
+            "required": ["bug_report_id"],
+        },
+        "config": {},
+        "config_schema": {},
+    },
+    {
+        "name": "report_workspace_bug",
+        "display_name": "Report Workspace Bug",
+        "description": "Report a bug on a deployed workspace project. Creates a bug report for the Software Engineer agent to investigate and fix.",
+        "category": "workspace",
+        "icon": "🐞",
+        "is_default": True,
+        "parameters_schema": {
+            "type": "object",
+            "properties": {
+                "slug": {"type": "string", "description": "The project slug with the bug"},
+                "description": {
+                    "type": "string",
+                    "description": "Detailed description of the bug, including steps to reproduce if possible",
+                },
+            },
+            "required": ["slug", "description"],
+        },
+        "config": {},
+        "config_schema": {},
+    },
+]
+
 BUILTIN_TOOLS = [
     *BUILTIN_TOOLS,
     *OKR_BUILTIN_TOOLS,
+    *WORKSPACE_BUILTIN_TOOLS,
 ]
 
 
@@ -3724,7 +3689,7 @@ async def clean_orphaned_mcp_tools():
         stmt = delete(Tool).where(
             and_(
                 Tool.type == "mcp",
-                Tool.tenant_id == None,
+                Tool.tenant_id is None,
                 ~Tool.id.in_(assigned_ids) if assigned_ids else True
             )
         )

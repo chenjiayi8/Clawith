@@ -115,7 +115,7 @@ class DiscordGatewayManager:
                     await message.reply(chunk, mention_author=False)
 
         # Run the bot in a background task
-        proxy = os.environ.get("DISCORD_PROXY") or os.environ.get("HTTPS_PROXY") or None
+        os.environ.get("DISCORD_PROXY") or os.environ.get("HTTPS_PROXY") or None
 
         async def _run_bot():
             try:
@@ -148,10 +148,7 @@ class DiscordGatewayManager:
             from app.models.agent import Agent as AgentModel
             from app.api.feishu import _call_agent_llm
             from app.services.channel_session import find_or_create_channel_session
-            from app.models.user import User as _User
-            from app.core.security import hash_password as _hp
             from datetime import datetime, timezone
-            import uuid as _uuid
 
             sender_id = str(message.author.id)
             channel_id = str(message.channel.id)
@@ -169,7 +166,6 @@ class DiscordGatewayManager:
                 agent_obj = agent_r.scalar_one_or_none()
                 if not agent_obj:
                     return "Agent not found."
-                creator_id = agent_obj.creator_id
                 from app.models.agent import DEFAULT_CONTEXT_WINDOW_SIZE
                 ctx_size = agent_obj.context_window_size or DEFAULT_CONTEXT_WINDOW_SIZE
 
@@ -280,7 +276,7 @@ class DiscordGatewayManager:
         async with async_session() as db:
             result = await db.execute(
                 select(ChannelConfig).where(
-                    ChannelConfig.is_configured == True,
+                    ChannelConfig.is_configured,
                     ChannelConfig.channel_type == "discord",
                 )
             )

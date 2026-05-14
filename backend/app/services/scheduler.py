@@ -6,13 +6,12 @@ and executes them by calling the LLM with the schedule's instruction.
 """
 
 import asyncio
-import json
 import uuid
 from datetime import datetime, timezone
 
 from croniter import croniter
 from loguru import logger
-from sqlalchemy import select, update
+from sqlalchemy import select
 
 
 def compute_next_run(cron_expr: str, after: datetime | None = None) -> datetime | None:
@@ -94,7 +93,7 @@ async def _tick():
         async with async_session() as db:
             result = await db.execute(
                 select(AgentSchedule).where(
-                    AgentSchedule.is_enabled == True,
+                    AgentSchedule.is_enabled,
                     AgentSchedule.next_run_at <= now,
                 )
             )

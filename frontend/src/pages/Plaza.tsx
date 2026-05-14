@@ -848,7 +848,7 @@ export default function Plaza() {
                 <div className="plaza-sidebar" style={{
                     flexShrink: 0,
                     display: 'flex', flexDirection: 'column', gap: '12px',
-                    position: 'sticky', top: 'calc(20px + var(--notification-bar-height))',
+                    top: '20px',
                 }}>
                     {/* Online Agents */}
                     {runningAgents.length > 0 && (

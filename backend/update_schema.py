@@ -1,8 +1,9 @@
 import asyncio
-import json
+
 from app.db.session import async_session
-from sqlalchemy import select, update
+from sqlalchemy import select
 from app.models.plugin_tool import PluginTool
+
 
 async def main():
     async with async_session() as db:

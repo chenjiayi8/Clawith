@@ -3,9 +3,8 @@
 import sys
 import logging
 from contextvars import ContextVar
-from typing import Optional
 
-from loguru import logger
+from loguru import logger as loguru_logger
 
 # Context variable for trace ID
 from uuid import uuid4
@@ -37,10 +36,10 @@ def set_trace_id(trace_id: str) -> None:
 def configure_logging():
     """Configure loguru with custom format including trace ID."""
     # Remove default handler
-    logger.remove()
+    loguru_logger.remove()
 
     # Add stdout handler with custom format and filter to ensure trace_id exists
-    logger.add(
+    loguru_logger.add(
         sys.stdout,
         level="INFO",
         format="<green>{time:YYYY-MM-DD HH:mm:ss}</green> | <level>{level}</level> | <cyan>{extra[trace_id]:-<12}</cyan> | <cyan>{name}</cyan>:<cyan>{line}</cyan> - <level>{message}</level>",
@@ -50,7 +49,7 @@ def configure_logging():
         filter=lambda record: (record["extra"].setdefault("trace_id", get_trace_id() or str(uuid4())) is not None)
     )
 
-    return logger
+    return loguru_logger
 
 
 def quiet_noisy_connection_loggers() -> None:
@@ -66,7 +65,7 @@ def intercept_standard_logging():
         def emit(self, record):
             # Get corresponding loguru level
             try:
-                level = logger.level(record.levelname).name
+                level = loguru_logger.level(record.levelname).name
             except ValueError:
                 level = record.levelno
 
@@ -86,7 +85,7 @@ def intercept_standard_logging():
                 else:
                     message = record.msg
 
-            logger.opt(depth=depth, exception=record.exc_info).log(
+            loguru_logger.opt(depth=depth, exception=record.exc_info).log(
                 level, message
             )
 

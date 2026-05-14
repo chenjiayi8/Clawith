@@ -8,13 +8,11 @@ This module handles user registration including:
 
 import re
 import uuid
-from datetime import datetime
 from typing import Any
 
-from sqlalchemy import select, or_, and_
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.config import get_settings
 from app.core.security import hash_password
 from app.models.identity import IdentityProvider
 from app.models.tenant import Tenant
@@ -80,7 +78,7 @@ class RegistrationService:
         result = await db.execute(
             select(Tenant).where(
                 Tenant.sso_domain.ilike(f"%{domain}%"),
-                Tenant.is_active == True,
+                Tenant.is_active,
             )
         )
         return result.scalar_one_or_none()
@@ -382,7 +380,6 @@ class RegistrationService:
                 return None, False, "Failed to get access token from provider"
 
             # Get user info
-            from app.services.auth_provider import ExternalUserInfo
             user_info_obj = await auth_provider.get_user_info(access_token)
 
             # Convert to dict
@@ -466,7 +463,7 @@ class RegistrationService:
             result = await db.execute(
                 select(InvitationCode).where(
                     InvitationCode.code == invitation_code,
-                    InvitationCode.is_active == True,
+                    InvitationCode.is_active,
                     InvitationCode.tenant_id.is_not(None),
                 )
             )
@@ -497,7 +494,6 @@ class RegistrationService:
         if not user.tenant_id:
             return
 
-        from app.models.org import OrgMember
         member = await self._find_unbound_org_member_by_contact(db, user)
         if member:
             member.user_id = user.id
@@ -529,7 +525,7 @@ class RegistrationService:
                 select(OrgMember).where(
                     OrgMember.email == user.email,
                     OrgMember.tenant_id == user.tenant_id,
-                    OrgMember.user_id == None,
+                    OrgMember.user_id is None,
                 ).limit(1)
             )
             member = result.scalar_one_or_none()
@@ -541,7 +537,7 @@ class RegistrationService:
                 select(OrgMember).where(
                     OrgMember.phone == user.primary_mobile,
                     OrgMember.tenant_id == user.tenant_id,
-                    OrgMember.user_id == None,
+                    OrgMember.user_id is None,
                 ).limit(1)
             )
             member = result.scalar_one_or_none()
@@ -581,7 +577,7 @@ class RegistrationService:
                     OrgMember.email == user.email,
                     OrgMember.tenant_id == user.tenant_id,
                     OrgMember.provider_id == web_provider.id,
-                    OrgMember.user_id == None,
+                    OrgMember.user_id is None,
                 ).limit(1)
             )
             member = result.scalar_one_or_none()
@@ -592,7 +588,7 @@ class RegistrationService:
                     OrgMember.phone == user.primary_mobile,
                     OrgMember.tenant_id == user.tenant_id,
                     OrgMember.provider_id == web_provider.id,
-                    OrgMember.user_id == None,
+                    OrgMember.user_id is None,
                 ).limit(1)
             )
             member = result.scalar_one_or_none()

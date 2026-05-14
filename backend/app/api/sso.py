@@ -1,15 +1,14 @@
-import os
 import uuid
 from datetime import datetime, timedelta, timezone
 from urllib.parse import quote
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
 from app.models.identity import SSOScanSession, IdentityProvider
-from app.schemas.schemas import TokenResponse, UserOut
+from app.schemas.schemas import UserOut
 
 router = APIRouter(tags=["sso"])
 
@@ -91,8 +90,8 @@ async def get_sso_config(sid: uuid.UUID, request: Request, db: AsyncSession = De
         
     # 2. Query IdentityProviders for this tenant (only those that are active AND SSO-enabled)
     query = select(IdentityProvider).where(
-        IdentityProvider.is_active == True,
-        IdentityProvider.sso_login_enabled == True,
+        IdentityProvider.is_active,
+        IdentityProvider.sso_login_enabled,
     )
     if session.tenant_id:
         query = query.where(IdentityProvider.tenant_id == session.tenant_id)

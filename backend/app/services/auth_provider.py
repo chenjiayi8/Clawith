@@ -9,13 +9,10 @@ from urllib.parse import quote, urlencode
 import httpx
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from datetime import datetime
-from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.security import create_access_token, hash_password
 from app.models.identity import IdentityProvider
 from app.models.user import User, Identity
 from app.services.google_workspace_oauth import GOOGLE_HTTP_PROXY
@@ -279,6 +276,7 @@ class FeishuAuthProvider(BaseAuthProvider):
     FEISHU_TOKEN_URL = "https://open.feishu.cn/open-apis/authen/v1/oidc/access_token"
     FEISHU_USER_INFO_URL = "https://open.feishu.cn/open-apis/authen/v1/user_info"
     FEISHU_APP_TOKEN_URL = "https://open.feishu.cn/open-apis/auth/v3/app_access_token/internal"
+    FEISHU_CONTACT_ME_URL = "https://open.feishu.cn/open-apis/contact/v3/users/me"
 
     def __init__(self, provider: IdentityProvider | None = None, config: dict | None = None):
         super().__init__(provider, config)
@@ -325,14 +323,36 @@ class FeishuAuthProvider(BaseAuthProvider):
             info_data = info_resp.json().get("data", {})
             logger.info(f"Feishu user info: {info_data}")
 
+            contact_data: dict = {}
+            try:
+                app_token = await self.get_app_access_token()
+                contact_resp = await client.get(
+                    self.FEISHU_CONTACT_ME_URL,
+                    headers={
+                        "Authorization": f"Bearer {access_token}",
+                        "x-tt-env": "prod",
+                        "x-lark-tenant-access-token": app_token,
+                    },
+                )
+                contact_payload = contact_resp.json()
+                contact_data = (contact_payload.get("data") or {}).get("user") or {}
+            except Exception as exc:
+                logger.warning(f"Feishu contact lookup failed: {exc}")
+
+            provider_user_id = contact_data.get("user_id") or info_data.get("open_id")
+            email = contact_data.get("email") or info_data.get("email", "")
+            mobile = contact_data.get("mobile") or info_data.get("mobile", "")
+            raw_data = {**info_data, **contact_data}
+
             return ExternalUserInfo(
                 provider_type=self.provider_type,
                 provider_union_id=info_data.get("union_id"),
+                provider_user_id=provider_user_id,
                 name=info_data.get("name", ""),
-                email=info_data.get("email", ""),
+                email=email,
                 avatar_url=info_data.get("avatar_url", ""),
-                mobile=info_data.get("mobile", ""),
-                raw_data=info_data,
+                mobile=mobile,
+                raw_data=raw_data,
             )
 
     async def _find_user_by_legacy_fields(self, db: AsyncSession, user_info: ExternalUserInfo) -> User | None:
@@ -365,7 +385,6 @@ class DingTalkAuthProvider(BaseAuthProvider):
     async def get_authorization_url(self, redirect_uri: str, state: str) -> str:
         app_id = self.app_key or ""
         base_url = "https://login.dingtalk.com/oauth2/auth"
-        from urllib.parse import quote
         # Contact.User.Read is required for GET /v1.0/contact/users/me (user info on callback)
         # contact.user.mobile requires the fieldMobile permission in DingTalk console
         # fieldEmail requires the fieldEmail permission in DingTalk console
@@ -473,7 +492,6 @@ class WeComAuthProvider(BaseAuthProvider):
         to authenticate with their WeCom account then returns them to redirect_uri
         with a code parameter.
         """
-        from urllib.parse import quote
         base_url = "https://open.work.weixin.qq.com/wwlogin/sso/login"
         params = (
             f"loginType=CorpPinCorp"
@@ -667,7 +685,6 @@ class GoogleWorkspaceAuthProvider(BaseAuthProvider):
         access_type: str = "online",
         prompt: str = "select_account",
     ) -> str:
-        from urllib.parse import quote
 
         scope_value = scopes or self.scope
         if isinstance(scope_value, list):

@@ -11,7 +11,7 @@ from datetime import datetime, timedelta
 from typing import Optional
 from loguru import logger
 
-from agentbay import AgentBay, BrowserOption, CreateSessionParams
+from agentbay import AgentBay, CreateSessionParams
 
 
 @dataclass
@@ -72,7 +72,7 @@ class AgentBayClient:
             return
         try:
             await asyncio.to_thread(self._session.delete)
-            logger.info(f"[AgentBay] Closed session")
+            logger.info("[AgentBay] Closed session")
         except Exception as e:
             logger.warning(f"[AgentBay] Failed to close session: {e}")
         finally:
@@ -689,7 +689,7 @@ async def get_agentbay_api_key_for_agent(agent_id: uuid.UUID, db=None) -> Option
             select(ChannelConfig).where(
                 ChannelConfig.agent_id == agent_id,
                 ChannelConfig.channel_type == "agentbay",
-                ChannelConfig.is_configured == True,
+                ChannelConfig.is_configured,
             )
         )
         config = result.scalar_one_or_none()
@@ -715,7 +715,7 @@ async def get_agentbay_api_key_for_agent(agent_id: uuid.UUID, db=None) -> Option
         tool_result = await session.execute(
             select(Tool).where(
                 Tool.name == "agentbay_browser_navigate",
-                Tool.enabled == True,
+                Tool.enabled,
             ).limit(1)
         )
         tool = tool_result.scalar_one_or_none()
@@ -727,7 +727,7 @@ async def get_agentbay_api_key_for_agent(agent_id: uuid.UUID, db=None) -> Option
         all_result = await session.execute(
             select(Tool).where(
                 Tool.category == "agentbay",
-                Tool.enabled == True,
+                Tool.enabled,
             ).order_by(Tool.name)
         )
         candidate_tools.extend(

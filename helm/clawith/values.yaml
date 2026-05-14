@@ -200,6 +200,9 @@ secrets:
   create: true
   # Name of existing secret (if create is false)
   existingSecret: ""
+  # Optional explicit values; if empty and create=true, Helm generates random secrets.
+  secretKey: ""
+  jwtSecretKey: ""
 
 # Storage Class configuration (optional)
 # Set createStorageClass to true if you want to create a custom storage class

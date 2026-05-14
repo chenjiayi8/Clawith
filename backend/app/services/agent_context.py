@@ -180,7 +180,6 @@ async def build_agent_context(agent_id: uuid.UUID, agent_name: str, role_descrip
         relationships = "\n".join(relationships.split("\n")[1:]).strip()
 
     # --- Compose static and dynamic system prompt blocks ---
-    from datetime import datetime, timezone as _tz
     from app.services.timezone_utils import get_agent_timezone, now_in_timezone
     agent_tz_name = await get_agent_timezone(agent_id)
     agent_local_now = now_in_timezone(agent_tz_name)
@@ -232,12 +231,13 @@ When installing or importing an MCP server via `discover_resources` / `import_mc
     try:
         from app.models.channel_config import ChannelConfig
         from app.database import async_session as _ctx_session
+        from sqlalchemy import select as sa_select
         async with _ctx_session() as _ctx_db:
             _cfg_r = await _ctx_db.execute(
-                select(ChannelConfig).where(
+                sa_select(ChannelConfig).where(
                     ChannelConfig.agent_id == agent_id,
                     ChannelConfig.channel_type == "feishu",
-                    ChannelConfig.is_configured == True,
+                    ChannelConfig.is_configured,
                 )
             )
             _has_feishu = _cfg_r.scalar_one_or_none() is not None
@@ -319,7 +319,7 @@ When user asks to create a Feishu document (summarize PDF, write an article, etc
                 sa_select(ChannelConfig).where(
                     ChannelConfig.agent_id == agent_id,
                     ChannelConfig.channel_type == "atlassian",
-                    ChannelConfig.is_configured == True,
+                    ChannelConfig.is_configured,
                 )
             )
             atlassian_config = result.scalar_one_or_none()
@@ -366,6 +366,7 @@ You have access to Atlassian tools via the Rovo MCP server. **Always call them v
     # --- Company Intro (from system settings) ---
     try:
         from app.database import async_session
+        from app.models.agent import Agent as _AgentModel
         from app.models.system_settings import SystemSetting
         from sqlalchemy import select as sa_select
         async with async_session() as db:
@@ -593,7 +594,7 @@ If no search or webpage-reading tool is available, say that web lookup is not en
             result = await db.execute(
                 sa_select(AgentTrigger).where(
                     AgentTrigger.agent_id == agent_id,
-                    AgentTrigger.is_enabled == True,
+                    AgentTrigger.is_enabled,
                 )
             )
             triggers = result.scalars().all()

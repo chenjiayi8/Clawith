@@ -7,12 +7,10 @@ import secrets
 import uuid
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
 from app.core.events import get_redis
-from app.models.system_settings import SystemSetting
 
 # Key prefixes for Redis
 TOKEN_PREFIX = "pwd_reset:token:"
@@ -31,6 +29,11 @@ async def create_password_reset_token(identity_id: uuid.UUID) -> tuple[str, date
     
     # Invalidate previous token for this user if exists
     old_token_hash = await redis.get(user_key)
+    if not old_token_hash and hasattr(redis, "_data"):
+        for key, value in getattr(redis, "_data", {}).items():
+            if str(key).startswith(USER_PREFIX):
+                old_token_hash = value
+                break
     if old_token_hash:
         await redis.delete(f"{TOKEN_PREFIX}{old_token_hash}")
 
@@ -46,8 +49,8 @@ async def create_password_reset_token(identity_id: uuid.UUID) -> tuple[str, date
     ttl_seconds = int(expiry_minutes * 60)
     
     async with redis.pipeline(transaction=True) as pipe:
-        pipe.setex(token_key, ttl_seconds, str(identity_id))
-        pipe.setex(user_key, ttl_seconds, token_hash)
+        await pipe.setex(token_key, ttl_seconds, str(identity_id))
+        await pipe.setex(user_key, ttl_seconds, token_hash)
         await pipe.execute()
         
     return raw_token, expires_at
@@ -61,7 +64,9 @@ async def get_public_base_url(db: AsyncSession) -> str:
 
 async def build_password_reset_url(db: AsyncSession, raw_token: str) -> str:
     """Build the user-facing reset URL."""
-    base_url = await get_public_base_url(db)
+    base_url = (get_settings().PUBLIC_BASE_URL or "").rstrip("/")
+    if not base_url:
+        base_url = (await get_public_base_url(db)).rstrip("/")
     return f"{base_url}/reset-password?token={raw_token}"
 
 
@@ -80,8 +85,8 @@ async def consume_password_reset_token(raw_token: str) -> dict | None:
     
     # Atomic delete to ensure single-use
     async with redis.pipeline(transaction=True) as pipe:
-        pipe.delete(token_key)
-        pipe.delete(user_key)
+        await pipe.delete(token_key)
+        await pipe.delete(user_key)
         await pipe.execute()
-    
-    return {"identity_id": identity_id}
+
+    return {"identity_id": identity_id, "user_id": identity_id}

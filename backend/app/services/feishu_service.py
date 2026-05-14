@@ -12,11 +12,11 @@ try:
 except ImportError:
     lark = None  # type: ignore
     _HAS_LARK = False
-from sqlalchemy import select, or_
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
-from app.core.security import create_access_token, hash_password
+from app.core.security import create_access_token
 from app.models.user import User, Identity
 from app.models.identity import IdentityProvider
 
@@ -201,8 +201,9 @@ class FeishuService:
 
         open_id = feishu_user["open_id"]
         user_id = feishu_user.get("user_id", "")
-        union_id = feishu_user.get("union_id")
+        feishu_user.get("union_id")
         fs_email = feishu_user.get("email", "")
+        fs_mobile = feishu_user.get("mobile", "")
         fs_name = feishu_user.get("name", "")
         fs_avatar = feishu_user.get("avatar_url", "")
 
@@ -298,7 +299,7 @@ class FeishuService:
             identity = await registration_service.find_or_create_identity(
                 db,
                 email=email,
-                phone=user_info.get("mobile"),
+                phone=fs_mobile,
                 username=username,
                 password=open_id,
             )
@@ -477,7 +478,7 @@ class FeishuService:
                                   action_type: str, details: str, approval_id: str) -> dict:
         """Send an interactive approval card to the agent creator via Feishu."""
         import json
-        card_content = json.dumps({
+        json.dumps({
             "type": "template",
             "data": {
                 "template_id": "",  # Use custom card

@@ -20,9 +20,9 @@ settings = get_settings()
 def _log_bwrap_startup_status() -> None:
     """Emit a startup diagnostic for bubblewrap availability.
 
-    We only warn when bwrap is missing so deployments can still start. Local
-    source runs may explicitly allow a reduced-isolation fallback, while
-    containerized deployments should keep fail-closed behavior.
+    We only warn when bwrap is missing so deployments can still start in
+    degraded mode. The subprocess sandbox will fall back to the hardened local
+    execution path in that case.
     """
     in_container = Path("/.dockerenv").exists()
     bwrap_path = shutil.which("bwrap")
@@ -35,26 +35,23 @@ def _log_bwrap_startup_status() -> None:
     if in_container:
         logger.warning(
             "[startup] bubblewrap (bwrap) is not installed in the backend container. "
-            "The service will still start, but execute_code will fail closed unless "
-            "SANDBOX_ALLOW_UNSAFE_FALLBACK_WHEN_BWRAP_MISSING=true is explicitly set."
+            "The service will still start, but execute_code will run without bwrap filesystem isolation."
         )
         return
 
-    if settings.SANDBOX_ALLOW_UNSAFE_FALLBACK_WHEN_BWRAP_MISSING:
-        logger.warning(
-            "[startup] bubblewrap (bwrap) is not installed on the host. "
-            "Local execute_code will use the reduced-isolation fallback."
-        )
-    else:
-        logger.warning(
-            "[startup] bubblewrap (bwrap) is not installed on the host. "
-            "execute_code will fail closed unless SANDBOX_ALLOW_UNSAFE_FALLBACK_WHEN_BWRAP_MISSING=true is set."
-        )
+    logger.warning(
+        "[startup] bubblewrap (bwrap) is not installed on the host. "
+        "The service will still start, but execute_code will run without bwrap filesystem isolation."
+    )
 
 
 async def _start_ss_local() -> None:
     """Start ss-local SOCKS5 proxy for Discord API calls. Tries nodes in priority order."""
-    import asyncio, json, os, shutil, tempfile
+    import asyncio
+    import json
+    import os
+    import shutil
+    import tempfile
     if not shutil.which("ss-local"):
         logger.info("[Proxy] ss-local not found — Discord proxy disabled")
         return
@@ -84,7 +81,8 @@ async def _start_ss_local() -> None:
         cfg = {"server": node["server"], "server_port": node["port"], "local_address": "127.0.0.1",
                "local_port": 1080, "password": node["password"], "method": node["method"], "timeout": 10}
         tf = tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False)
-        json.dump(cfg, tf); tf.close()
+        json.dump(cfg, tf)
+        tf.close()
         try:
             proc = await asyncio.create_subprocess_exec(
                 "ss-local", "-c", tf.name,
@@ -118,7 +116,6 @@ async def lifespan(app: FastAPI):
         )
 
     import asyncio
-    import sys
     import os
     from app.services.trigger_daemon import start_trigger_daemon
     from app.services.tool_seeder import seed_builtin_tools
@@ -130,42 +127,6 @@ async def lifespan(app: FastAPI):
     from app.services.discord_gateway import discord_gateway_manager
     from app.services.workspace_health import run_health_checks
 
-    # ── Step 0: Ensure all DB tables exist (idempotent, safe to run on every startup) ──
-    try:
-        from app.database import Base, engine
-        # Import all models so Base.metadata is fully populated
-        import app.models.user           # noqa
-        import app.models.agent          # noqa
-        import app.models.task           # noqa
-        import app.models.llm            # noqa
-        import app.models.tool           # noqa
-        import app.models.audit          # noqa
-        import app.models.skill          # noqa
-        import app.models.channel_config  # noqa
-        import app.models.schedule       # noqa
-        import app.models.plaza          # noqa
-        import app.models.activity_log   # noqa
-        import app.models.org            # noqa
-        import app.models.system_settings  # noqa
-        import app.models.invitation_code  # noqa
-        import app.models.tenant         # noqa
-        import app.models.tenant_setting  # noqa
-        import app.models.participant    # noqa
-        import app.models.chat_session   # noqa
-        import app.models.trigger        # noqa
-        import app.models.focus          # noqa
-        import app.models.notification   # noqa
-        import app.models.gateway_message # noqa
-        import app.models.agent_credential  # noqa
-        import app.models.okr            # noqa  OKR system tables
-        import app.models.onboarding     # noqa
-        import app.models.identity       # noqa
-        import app.models.workspace      # noqa: F401
-        async with engine.begin() as conn:
-            await conn.run_sync(Base.metadata.create_all)
-        logger.info("[startup] Database tables ready")
-    except Exception as e:
-        logger.warning(f"[startup] create_all failed: {e}")
     # Startup: seed data — each step isolated so one failure doesn't block others
     logger.info("[startup] seeding...")
 
@@ -426,7 +387,7 @@ async def health_check():
 # ── Version endpoint (public, no auth required) ──
 def _load_version_info() -> dict[str, str]:
     """Read version + commit hash once at startup."""
-    import os, subprocess
+    import subprocess
     version = "unknown"
     for candidate in ["../frontend/VERSION", "frontend/VERSION", "VERSION"]:
         try:

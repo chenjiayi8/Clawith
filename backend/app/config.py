@@ -36,18 +36,14 @@ def _default_agent_template_dir() -> str:
     """Locate the agent template directory for both Docker and source deployments.
 
     In a Docker container the backend source is copied to /app, so the template
-    lives at /app/agent_template. In a source deployment it sits next to the
+    lives at /app/agent_template.  In a source deployment it sits next to the
     backend/ package root, i.e. <repo>/backend/agent_template.
     """
     if _running_in_container():
         return "/app/agent_template"
+    # Source layout: backend/app/config.py -> ../.. = backend/ -> agent_template
     source_path = Path(__file__).resolve().parent.parent / "agent_template"
     return str(source_path)
-
-
-def _default_allow_unsafe_bwrap_fallback() -> bool:
-    """Allow local source runs to work without bubblewrap by default."""
-    return not _running_in_container()
 
 
 def _read_version() -> str:
@@ -91,10 +87,10 @@ class Settings(BaseSettings):
 
     # File Storage
     AGENT_DATA_DIR: str = _default_agent_data_dir()
+    AGENT_TEMPLATE_DIR: str = _default_agent_template_dir()
     WORKSPACE_STATIC_DIR: str = "/srv/workspace"
     WORKSPACE_CONF_DIR: str = "/etc/nginx/workspace.d"
     WORKSPACE_GATEWAY_CONTAINER: str = "workspace_gateway"
-    AGENT_TEMPLATE_DIR: str = _default_agent_template_dir()
 
     # Docker (for Agent containers)
     DOCKER_NETWORK: str = "clawith_network"
@@ -117,6 +113,7 @@ class Settings(BaseSettings):
     # Exa AI (Search API)
     EXA_API_KEY: str = ""
 
+
     # Sandbox configuration
     SANDBOX_TYPE: SandboxType = SandboxType.SUBPROCESS
     SANDBOX_API_KEY: str = ""
@@ -124,7 +121,6 @@ class Settings(BaseSettings):
     SANDBOX_CPU_LIMIT: str = "0.5"
     SANDBOX_MEMORY_LIMIT: str = "256m"
     SANDBOX_ALLOW_NETWORK: bool = False
-    SANDBOX_ALLOW_UNSAFE_FALLBACK_WHEN_BWRAP_MISSING: bool = _default_allow_unsafe_bwrap_fallback()
     SANDBOX_DEFAULT_TIMEOUT: int = 30
     SANDBOX_MAX_TIMEOUT: int = 60
 
@@ -153,7 +149,6 @@ def get_sandbox_config() -> SandboxConfig:
         cpu_limit=settings.SANDBOX_CPU_LIMIT,
         memory_limit=settings.SANDBOX_MEMORY_LIMIT,
         allow_network=settings.SANDBOX_ALLOW_NETWORK,
-        allow_unsafe_fallback_when_bwrap_missing=settings.SANDBOX_ALLOW_UNSAFE_FALLBACK_WHEN_BWRAP_MISSING,
         default_timeout=settings.SANDBOX_DEFAULT_TIMEOUT,
         max_timeout=settings.SANDBOX_MAX_TIMEOUT,
     )

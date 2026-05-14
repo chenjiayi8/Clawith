@@ -247,7 +247,7 @@ async def _execute_heartbeat(agent_id: uuid.UUID):
                 notif_result = await db.execute(
                     select(Notification).where(
                         Notification.agent_id == agent_id,
-                        Notification.is_read == False,
+                        not Notification.is_read,
                     ).order_by(Notification.created_at).limit(10)
                 )
                 unread = notif_result.scalars().all()
@@ -461,7 +461,7 @@ async def _heartbeat_tick():
         async with async_session() as db:
             result = await db.execute(
                 select(Agent).where(
-                    Agent.heartbeat_enabled == True,
+                    Agent.heartbeat_enabled,
                     Agent.status.in_(["running", "idle"]),
                 )
             )

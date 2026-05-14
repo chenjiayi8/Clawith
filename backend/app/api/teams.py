@@ -1,7 +1,5 @@
 """Microsoft Teams Bot Channel API routes."""
 
-import hashlib
-import hmac
 import json
 import os
 import time
@@ -9,7 +7,7 @@ import uuid
 from datetime import datetime, timezone
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from loguru import logger
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -26,10 +24,7 @@ from app.schemas.schemas import ChannelConfigOut
 from app.services.channel_session import find_or_create_channel_session
 from app.api.feishu import _call_agent_llm
 from app.services.agent_tools import channel_file_sender as _cfs_s
-from app.core.security import hash_password as _hp
 from pathlib import Path as _Path
-import asyncio as _asyncio
-import random as _random
 
 settings = get_settings()
 
@@ -77,7 +72,7 @@ async def _get_teams_access_token(config: ChannelConfig) -> str | None:
             await credential.close()
             return token.token
         except ImportError:
-            logger.error(f"Teams: azure-identity package not installed. Install it with: pip install azure-identity")
+            logger.error("Teams: azure-identity package not installed. Install it with: pip install azure-identity")
             return None
         except Exception as e:
             logger.exception(f"Teams: Failed to get access token via managed identity for agent {agent_id}: {e}")
@@ -109,7 +104,7 @@ async def _get_teams_access_token(config: ChannelConfig) -> str | None:
                     error_description = error_json.get("error_description", "No description")
                     error_code = error_json.get("error", "unknown")
                     logger.error(f"Teams: OAuth token request failed for agent {agent_id}: status={resp.status_code}, error={error_code}, description={error_description}")
-                except:
+                except Exception:
                     logger.error(f"Teams: OAuth token request failed for agent {agent_id}: status={resp.status_code}, response={error_body[:500]}")
                 logger.error(f"Teams: Token URL={token_url}, tenant_id={tenant_id}, client_id={app_id[:20]}...")
                 return None
@@ -131,7 +126,7 @@ async def _get_teams_access_token(config: ChannelConfig) -> str | None:
                 error_description = error_json.get("error_description", "No description")
                 error_code = error_json.get("error", "unknown")
                 logger.error(f"Teams: OAuth token HTTP error for agent {agent_id}: status={e.response.status_code}, error={error_code}, description={error_description}")
-        except:
+        except Exception:
             logger.error(f"Teams: OAuth token HTTP error for agent {agent_id}: status={e.response.status_code if hasattr(e, 'response') and e.response else 'unknown'}, response={error_body[:500]}")
         logger.error(f"Teams: Token URL={token_url}, tenant_id={tenant_id}, client_id={app_id[:20]}...")
         return None
@@ -195,7 +190,7 @@ async def _send_teams_message_single_chunk(access_token: str, service_url: str, 
                     error_description = error_json.get("error", {}).get("message", error_json.get("message", "No description"))
                     error_code = error_json.get("error", {}).get("code", "unknown")
                     logger.error(f"Teams: Failed to send message: status={resp.status_code}, error={error_code}, description={error_description}")
-                except:
+                except Exception:
                     logger.error(f"Teams: Failed to send message: status={resp.status_code}, response={error_body[:500]}")
                 logger.error(f"Teams: POST URL={post_url}, conversation_id={conversation_id}, service_url={service_url}")
             resp.raise_for_status()
@@ -208,7 +203,7 @@ async def _send_teams_message_single_chunk(access_token: str, service_url: str, 
                 error_description = error_json.get("error", {}).get("message", error_json.get("message", "No description"))
                 error_code = error_json.get("error", {}).get("code", "unknown")
                 logger.error(f"Teams: HTTP error sending message: status={e.response.status_code}, error={error_code}, description={error_description}")
-        except:
+        except Exception:
             logger.error(f"Teams: HTTP error sending message: status={e.response.status_code if hasattr(e, 'response') and e.response else 'unknown'}, response={error_body[:500]}")
         logger.error(f"Teams: POST URL={post_url}, conversation_id={conversation_id}, service_url={service_url}")
         raise
@@ -535,7 +530,7 @@ async def teams_event_webhook(
                     if config.app_id:
                         bot_channel_account = {"id": config.app_id}
                     else:
-                        logger.error(f"Teams: Cannot determine bot channel account ID - no recipient in activity and no app_id configured")
+                        logger.error("Teams: Cannot determine bot channel account ID - no recipient in activity and no app_id configured")
                         raise ValueError("Cannot determine bot channel account ID")
                 
                 # Get the user (sender) from the incoming activity's from field
@@ -553,7 +548,7 @@ async def teams_event_webhook(
                 }
                 logger.info(f"Teams: Attempting to send reply to conversation {conversation_id}, from={bot_channel_account.get('id')}, recipient={user_account.get('id')}")
                 await _send_teams_message(config, conversation_id, reply_activity)
-                logger.info(f"Teams: Successfully sent reply to Teams")
+                logger.info("Teams: Successfully sent reply to Teams")
             except Exception as e:
                 logger.exception(f"Teams: Failed to send message to Teams: {e}")
         else:

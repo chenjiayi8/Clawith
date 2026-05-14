@@ -11,8 +11,7 @@ if [ "$(id -u)" = '0' ]; then
     echo "[entrypoint] Detected root user, fixing permissions..."
     chown -R clawith:clawith ${AGENT_DATA_DIR}
 
-    # Add clawith to the docker-socket group when the socket is mounted so
-    # workspace container-management commands can talk to Docker.
+    # Add clawith to docker group (GID from mounted socket) for workspace container management
     DOCKER_SOCK_GID=$(stat -c '%g' /var/run/docker.sock 2>/dev/null || true)
     if [ -n "$DOCKER_SOCK_GID" ] && [ "$DOCKER_SOCK_GID" != "0" ]; then
         echo "[entrypoint] Adding clawith to docker socket group (GID=$DOCKER_SOCK_GID)..."
@@ -53,7 +52,7 @@ if [ $ALEMBIC_EXIT -ne 0 ]; then
     echo "    Source:  git pull && alembic upgrade head"
     echo "------------------------------------------------------------------------"
     echo ""
-    echo "[entrypoint] Continuing startup despite migration failure..."
+    exit $ALEMBIC_EXIT
 else
     echo "[entrypoint] Alembic migrations completed successfully."
 fi

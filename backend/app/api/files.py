@@ -4,14 +4,14 @@ import base64
 import csv
 import io
 import mimetypes
-import os
+import re
 import uuid
 import zipfile
 from pathlib import Path
 
 import aiofiles
 from fastapi import APIRouter, Depends, Form, HTTPException, status
-from fastapi.responses import FileResponse, Response
+from fastapi.responses import FileResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel
 
@@ -128,6 +128,19 @@ TEXT_PREVIEW_FILENAMES = {
 }
 
 
+def _is_protected_workspace_path(rel_path: str) -> bool:
+    normalized = (rel_path or "").strip().strip("/")
+    if not normalized:
+        return False
+    parts = Path(normalized).parts
+    return any(part == ".openclaw" for part in parts)
+
+
+def _ensure_not_protected_workspace_path(rel_path: str) -> None:
+    if _is_protected_workspace_path(rel_path):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied for protected workspace path")
+
+
 def _agent_base_dir(agent_id: uuid.UUID) -> Path:
     return Path(settings.AGENT_DATA_DIR) / str(agent_id)
 
@@ -155,21 +168,6 @@ def _visible_path(agent_id: uuid.UUID, rel_path: str, tenant_id: uuid.UUID | Non
     return resolved.path, resolved.relative_root, resolved.is_enterprise
 
 
-async def _require_agent_file_delete_access(
-    db: AsyncSession,
-    current_user: User,
-    agent_id: uuid.UUID,
-) -> None:
-    """Allow destructive workspace file operations only for managers/admins."""
-    _agent, access_level = await check_agent_access(db, current_user, agent_id)
-    if access_level == "manage" or current_user.role in ("platform_admin", "org_admin", "super_admin"):
-        return
-    raise HTTPException(
-        status_code=status.HTTP_403_FORBIDDEN,
-        detail="Only agent managers or admins can delete files",
-    )
-
-
 @router.get("/", response_model=list[FileInfo])
 async def list_files(
     agent_id: uuid.UUID,
@@ -179,6 +177,7 @@ async def list_files(
 ):
     """List files and directories in an agent's file system."""
     await check_agent_access(db, current_user, agent_id)
+    _ensure_not_protected_workspace_path(path)
     target, base_abs, is_enterprise = _visible_path(agent_id, path, current_user.tenant_id)
     if is_enterprise:
         target.mkdir(parents=True, exist_ok=True)
@@ -203,6 +202,8 @@ async def list_files(
         ))
     for entry in sorted(target.iterdir(), key=lambda e: (not e.is_dir(), e.name)):
         if entry.name == '.gitkeep':
+            continue
+        if entry.name == ".openclaw":
             continue
         if not path and entry.name.lower() in {"focus.md", "agenda.md"}:
             continue
@@ -232,6 +233,7 @@ async def read_file(
 ):
     """Read the content of a file."""
     await check_agent_access(db, current_user, agent_id)
+    _ensure_not_protected_workspace_path(path)
     if is_focus_file_path(path):
         raise HTTPException(
             status_code=status.HTTP_410_GONE,
@@ -502,6 +504,7 @@ async def download_file(
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found or inactive")
 
     await check_agent_access(db, user, agent_id)
+    _ensure_not_protected_workspace_path(path)
     target, _, _ = _visible_path(agent_id, path, user.tenant_id)
     if not target.exists() or not target.is_file():
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="File not found")
@@ -672,7 +675,7 @@ async def delete_file(
     db: AsyncSession = Depends(get_db),
 ):
     """Delete a file."""
-    await _require_agent_file_delete_access(db, current_user, agent_id)
+    await check_agent_access(db, current_user, agent_id)
     if is_focus_file_path(path):
         raise HTTPException(
             status_code=status.HTTP_410_GONE,
@@ -715,7 +718,7 @@ async def import_skill_to_agent(
     await check_agent_access(db, current_user, agent_id)
 
     from sqlalchemy.orm import selectinload
-    from app.models.skill import Skill, SkillFile
+    from app.models.skill import Skill
 
     # Load the global skill with its files
     result = await db.execute(
@@ -758,6 +761,53 @@ from fastapi import File as FastFile, UploadFile as UploadFileType
 
 upload_router = APIRouter(prefix="/agents/{agent_id}/files", tags=["files"])
 DEFAULT_UPLOAD_DIR = "workspace/uploads"
+MAX_ZIP_SIZE = 50 * 1024 * 1024  # 50MB compressed
+MAX_ZIP_FILES = 1000
+MAX_UNCOMPRESSED = 500 * 1024 * 1024  # 500MB uncompressed
+_VALID_ROOT_NAME = re.compile(r"^[a-zA-Z0-9_-]+$")
+
+
+def _validate_zip(content: bytes) -> tuple[zipfile.ZipFile, list[str], str]:
+    """Validate and open a zip archive."""
+    if len(content) > MAX_ZIP_SIZE:
+        raise HTTPException(status_code=400, detail=f"Zip file too large (max {MAX_ZIP_SIZE // 1024 // 1024}MB)")
+
+    try:
+        zf = zipfile.ZipFile(io.BytesIO(content))
+    except zipfile.BadZipFile as exc:
+        raise HTTPException(status_code=400, detail="Invalid zip file") from exc
+
+    names = zf.namelist()
+    total_uncompressed = sum(item.file_size for item in zf.infolist())
+    if total_uncompressed > MAX_UNCOMPRESSED:
+        zf.close()
+        raise HTTPException(
+            status_code=400,
+            detail=f"Zip uncompressed size too large (max 500MB, got {total_uncompressed // 1024 // 1024}MB)",
+        )
+    if len(names) > MAX_ZIP_FILES:
+        zf.close()
+        raise HTTPException(status_code=400, detail=f"Too many files (max {MAX_ZIP_FILES})")
+
+    parts = [name.split("/")[0] for name in names if "/" in name]
+    root_folder = parts[0] if parts and all(part == parts[0] for part in parts) else ""
+
+    return zf, names, root_folder
+
+
+def _rewrite_zip_member_path(member_path: str, zip_root: str, root_name: str) -> str:
+    rel_path = member_path
+    if zip_root and rel_path.startswith(f"{zip_root}/"):
+        rel_path = rel_path[len(zip_root) + 1:]
+
+    rel_path = rel_path.strip("/")
+    if not rel_path:
+        return ""
+
+    if root_name:
+        return str(Path(root_name) / rel_path)
+
+    return rel_path
 
 
 @upload_router.post("/upload")
@@ -812,43 +862,6 @@ async def upload_file_to_workspace(
     }
 
 
-MAX_ZIP_SIZE = 50 * 1024 * 1024  # 50MB compressed
-MAX_ZIP_FILES = 1000
-MAX_UNCOMPRESSED = 500 * 1024 * 1024  # 500MB uncompressed
-
-
-def _validate_zip(content: bytes) -> tuple[zipfile.ZipFile, list[str], str]:
-    """Validate and open a zip archive.
-
-    Returns (ZipFile, file_names, root_folder).
-    Raises HTTPException on validation failure.
-    """
-    if len(content) > MAX_ZIP_SIZE:
-        raise HTTPException(status_code=400, detail=f"Zip file too large (max {MAX_ZIP_SIZE // 1024 // 1024}MB)")
-
-    try:
-        zf = zipfile.ZipFile(io.BytesIO(content))
-    except zipfile.BadZipFile:
-        raise HTTPException(status_code=400, detail="Invalid zip file")
-
-    names = zf.namelist()
-    total_uncompressed = sum(i.file_size for i in zf.infolist())
-    if total_uncompressed > MAX_UNCOMPRESSED:
-        zf.close()
-        raise HTTPException(
-            status_code=400,
-            detail=f"Zip uncompressed size too large (max 500MB, got {total_uncompressed // 1024 // 1024}MB)",
-        )
-    if len(names) > MAX_ZIP_FILES:
-        zf.close()
-        raise HTTPException(status_code=400, detail=f"Too many files (max {MAX_ZIP_FILES})")
-
-    parts = [n.split("/")[0] for n in names if "/" in n]
-    root_folder = parts[0] if parts and all(p == parts[0] for p in parts) else ""
-
-    return zf, names, root_folder
-
-
 @upload_router.post("/preview-zip")
 async def preview_zip(
     agent_id: uuid.UUID,
@@ -856,23 +869,18 @@ async def preview_zip(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Preview zip contents before extraction."""
+    """Preview a zip archive before extracting it into agent skills."""
     await check_agent_access(db, current_user, agent_id)
 
     content = await file.read()
     zf, names, root_folder = _validate_zip(content)
     with zf:
-        files = [n for n in names if not n.endswith("/")]
+        files = [name for name in names if not name.endswith("/")]
         return {
             "root_folder": root_folder,
             "files": files[:200],
             "total": len(files),
         }
-
-
-import re as _re
-
-_VALID_ROOT_NAME = _re.compile(r"^[a-zA-Z0-9_-]+$")
 
 
 @upload_router.post("/extract-zip")
@@ -884,7 +892,7 @@ async def extract_zip(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Extract zip into agent's skills directory."""
+    """Extract a zip archive into the agent's skills workspace."""
     await check_agent_access(db, current_user, agent_id)
 
     if root_name and not _VALID_ROOT_NAME.match(root_name):
@@ -893,9 +901,7 @@ async def extract_zip(
     content = await file.read()
     zf, _names, zip_root = _validate_zip(content)
 
-    base = _agent_base_dir(agent_id)
-    skills_root = (base / "skills").resolve()
-
+    skills_root = (_agent_base_dir(agent_id) / "skills").resolve()
     if target_path:
         target_dir = (skills_root / target_path).resolve()
         if not str(target_dir).startswith(str(skills_root)):
@@ -904,22 +910,14 @@ async def extract_zip(
         target_dir = skills_root
 
     with zf:
-        extracted = []
+        extracted: list[str] = []
         for info in zf.infolist():
             if info.is_dir() or info.external_attr >> 28 == 0xA:
                 continue
             if info.filename.startswith("/") or ".." in Path(info.filename).parts:
                 continue
 
-            rel_path = info.filename
-            if root_name == "" and zip_root:
-                if rel_path.startswith(zip_root + "/"):
-                    rel_path = rel_path[len(zip_root) + 1:]
-                else:
-                    continue
-            elif root_name and zip_root and rel_path.startswith(zip_root + "/"):
-                rel_path = root_name + rel_path[len(zip_root):]
-
+            rel_path = _rewrite_zip_member_path(info.filename, zip_root, root_name)
             if not rel_path:
                 continue
 
@@ -931,14 +929,14 @@ async def extract_zip(
             out_path.write_bytes(zf.read(info.filename))
             extracted.append(str(Path(target_path) / rel_path) if target_path else rel_path)
 
-        from app.services.skill_map import invalidate_cache
-        invalidate_cache(agent_id)
+    from app.services.skill_map import invalidate_cache
+    invalidate_cache(agent_id)
 
-        return {
-            "status": "ok",
-            "extracted": len(extracted),
-            "files": extracted[:50],
-        }
+    return {
+        "status": "ok",
+        "extracted": len(extracted),
+        "files": extracted[:50],
+    }
 
 
 # ─── Enterprise Knowledge Base ─────────────────────────────────
@@ -998,7 +996,6 @@ async def upload_enterprise_kb_file(
     current_user: User = Depends(get_current_user),
 ):
     """Upload a file to enterprise knowledge base (tenant-scoped)."""
-    from app.core.security import require_role
     # Only admin can upload to enterprise KB
     if current_user.role not in ("platform_admin", "org_admin"):
         raise HTTPException(status_code=403, detail="Only admins can upload to enterprise knowledge base")

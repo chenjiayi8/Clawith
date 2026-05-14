@@ -12,13 +12,6 @@ from app.models.identity import IdentityProvider
 from app.services.auth_provider import (
     PROVIDER_CLASSES,
     BaseAuthProvider,
-    DingTalkAuthProvider,
-    FeishuAuthProvider,
-    GitHubAuthProvider,
-    GoogleAuthProvider,
-    GoogleWorkspaceAuthProvider,
-    MicrosoftTeamsAuthProvider,
-    WeComAuthProvider,
 )
 
 
@@ -53,7 +46,7 @@ class AuthProviderRegistry:
         # Try to get provider config from database
         query = select(IdentityProvider).where(
             IdentityProvider.provider_type == provider_type,
-            IdentityProvider.is_active == True,
+            IdentityProvider.is_active,
             IdentityProvider.tenant_id == tenant_id
         )
 
@@ -98,7 +91,7 @@ class AuthProviderRegistry:
         Returns:
             List of IdentityProvider records
         """
-        query = select(IdentityProvider).where(IdentityProvider.is_active == True)
+        query = select(IdentityProvider).where(IdentityProvider.is_active)
 
         if tenant_id:
             # Only include tenant-specific ones

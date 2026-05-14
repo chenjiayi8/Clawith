@@ -47,7 +47,7 @@ services:
       CORS_ORIGINS: '["*"]'
       FEISHU_APP_ID: ${FEISHU_APP_ID:-}
       FEISHU_APP_SECRET: ${FEISHU_APP_SECRET:-}
-      DOCKER_NETWORK: clawith_yaojin_network
+      DOCKER_NETWORK: clawith_network
       SS_CONFIG_FILE: /data/ss-nodes.json
       # Public base URL for constructing OAuth callback URLs and email links.
       # Required when deployed behind a reverse proxy (e.g. Nginx, Cloudflare).
@@ -60,7 +60,6 @@ services:
       - ./backend/agent_data:/data/agents
       - /var/run/docker.sock:/var/run/docker.sock
       - ./ss-nodes.json:/data/ss-nodes.json:ro
-    privileged: true
     cap_add:
       - SYS_ADMIN
     security_opt:

@@ -12,7 +12,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
-from app.core.security import get_current_admin, get_current_user, require_role, encrypt_data
+from app.core.security import get_current_admin, get_current_user, encrypt_data
 from app.database import async_session, get_db
 from app.models.org import OrgDepartment, OrgMember
 from app.models.identity import IdentityProvider
@@ -327,7 +327,7 @@ async def update_llm_model(
         await db.commit()
         await db.refresh(model)
         return LLMModelOut.model_validate(model)
-    except SQLAlchemyError as e:
+    except SQLAlchemyError:
         await db.rollback()
         raise HTTPException(status_code=500, detail="Failed to update model")
 
@@ -461,7 +461,7 @@ async def get_enterprise_stats(
 
     # Base queries
     agent_q = select(func.count(Agent.id))
-    user_q = select(func.count(User.id)).where(User.is_active == True)
+    user_q = select(func.count(User.id)).where(User.is_active)
     approval_q = select(func.count(ApprovalRequest.id))
 
     if tid:
@@ -507,6 +507,21 @@ class TenantQuotaUpdate(BaseModel):
     utility_model_id: str | None = None
 
 
+def _resolve_quota_tenant_id(current_user: User, tenant_id: str | None) -> uuid.UUID | None:
+    requested_tenant_id = tenant_id.strip() if tenant_id else ""
+    current_tenant_id = str(current_user.tenant_id) if current_user.tenant_id else ""
+
+    if requested_tenant_id:
+        if not _is_platform_admin_user(current_user) and requested_tenant_id != current_tenant_id:
+            raise HTTPException(status_code=403, detail="Cannot access other tenant quotas")
+        return uuid.UUID(requested_tenant_id)
+
+    if current_tenant_id:
+        return uuid.UUID(current_tenant_id)
+
+    return None
+
+
 
 
 def _resolve_tenant_quota_target(
@@ -529,8 +544,10 @@ async def get_tenant_quotas(
     db: AsyncSession = Depends(get_db),
 ):
     """Get tenant quota defaults and heartbeat settings."""
-    target_tenant_id = _resolve_tenant_quota_target(current_user, tenant_id)
-    result = await db.execute(select(Tenant).where(Tenant.id == target_tenant_id))
+    resolved_tenant_id = _resolve_quota_tenant_id(current_user, tenant_id)
+    if not resolved_tenant_id:
+        return {}
+    result = await db.execute(select(Tenant).where(Tenant.id == resolved_tenant_id))
     tenant = result.scalar_one_or_none()
     if not tenant:
         return {}
@@ -556,9 +573,11 @@ async def update_tenant_quotas(
     db: AsyncSession = Depends(get_db),
 ):
     """Update tenant quota defaults (admin only). Enforces heartbeat floor on existing agents."""
-    target_tenant_id = _resolve_tenant_quota_target(current_user, tenant_id)
+    resolved_tenant_id = _resolve_quota_tenant_id(current_user, tenant_id)
+    if not resolved_tenant_id:
+        raise HTTPException(status_code=400, detail="No tenant assigned")
 
-    result = await db.execute(select(Tenant).where(Tenant.id == target_tenant_id))
+    result = await db.execute(select(Tenant).where(Tenant.id == resolved_tenant_id))
     tenant = result.scalar_one_or_none()
     if not tenant:
         raise HTTPException(status_code=404, detail="Tenant not found")
@@ -590,6 +609,10 @@ async def update_tenant_quotas(
         tenant.min_poll_interval_floor = data.min_poll_interval_floor
     if data.max_webhook_rate_ceiling is not None:
         tenant.max_webhook_rate_ceiling = data.max_webhook_rate_ceiling
+    if data.utility_model_id is not None:
+        tenant.utility_model_id = (
+            None if data.utility_model_id == "" else uuid.UUID(data.utility_model_id)
+        )
 
     if data.utility_model_id is not None:
         if data.utility_model_id == "":
@@ -601,7 +624,7 @@ async def update_tenant_quotas(
             model = model_result.scalar_one_or_none()
             if not model:
                 raise HTTPException(status_code=404, detail="Model not found")
-            if not model.tenant_id or model.tenant_id != target_tenant_id:
+            if not model.tenant_id or model.tenant_id != resolved_tenant_id:
                 raise HTTPException(status_code=400, detail="Model is not tenant-scoped to this tenant")
             if not model.enabled:
                 raise HTTPException(status_code=400, detail="Model is disabled")
@@ -801,8 +824,8 @@ async def _sync_tenant_sso_state(db: AsyncSession, tenant_id: uuid.UUID):
     count_result = await db.execute(
         select(func.count(IdentityProvider.id)).where(
             IdentityProvider.tenant_id == tenant_id,
-            IdentityProvider.sso_login_enabled == True,
-            IdentityProvider.is_active == True,
+            IdentityProvider.sso_login_enabled,
+            IdentityProvider.is_active,
         )
     )
     active_sso_count = count_result.scalar() or 0
@@ -1305,7 +1328,6 @@ async def delete_identity_provider(
 
 # ─── Org Structure ──────────────────────────────────────
 
-from app.models.org import OrgDepartment, OrgMember
 
 
 @router.get("/org/departments")

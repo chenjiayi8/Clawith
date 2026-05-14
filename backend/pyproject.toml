@@ -60,6 +60,9 @@ dev = [
 target-version = "py311"
 line-length = 120
 
+[tool.ruff.lint]
+ignore = ["E402", "E701"]
+
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 

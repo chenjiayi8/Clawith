@@ -107,12 +107,7 @@ async def list_sessions(
             for row in count_res.all():
                 message_counts[row[0]] = row[1]
 
-            if any(
-                str(s.user_id) == str(current_user.id)
-                and not s.is_group
-                and s.source_channel not in ("agent", "trigger")
-                for s in sessions
-            ):
+            if any(str(s.user_id) == str(current_user.id) for s in sessions):
                 unread_res = await db.execute(
                     select(ChatSession.id, func.count(ChatMessage.id))
                     .join(ChatMessage, ChatMessage.conversation_id == cast(ChatSession.id, String))
@@ -423,12 +418,18 @@ async def get_session_messages(
     out = []
     for m in messages:
         sender_name = sender_cache.get(str(m.participant_id)) if m.participant_id else None
+        message_id = getattr(m, "id", None)
+        message_id_str = str(message_id) if message_id else None
 
         if m.role == "tool_call":
             import json
-            entry: dict = {"role": m.role, "content": m.content, "created_at": m.created_at.isoformat() if m.created_at else None}
-            if getattr(m, "id", None):
-                entry["id"] = str(m.id)
+            entry: dict = {
+                "role": m.role,
+                "content": m.content,
+                "created_at": m.created_at.isoformat() if m.created_at else None,
+            }
+            if message_id_str:
+                entry["id"] = message_id_str
             try:
                 data = json.loads(m.content)
                 entry["content"] = ""
@@ -439,7 +440,7 @@ async def get_session_messages(
                 entry["toolThinking"] = data.get("reasoning_content", "")
             except Exception:
                 pass
-            if getattr(m, 'is_hidden', False):
+            if getattr(m, "is_hidden", False):
                 entry["is_hidden"] = True
             if sender_name:
                 entry["sender_name"] = sender_name
@@ -454,12 +455,18 @@ async def get_session_messages(
                     part["sender_name"] = sender_name
                 if m.participant_id:
                     part["participant_id"] = str(m.participant_id)
+                if getattr(m, "is_hidden", False):
+                    part["is_hidden"] = True
                 out.append(part)
         else:
-            entry = {"role": m.role, "content": m.content, "created_at": m.created_at.isoformat() if m.created_at else None}
-            if getattr(m, "id", None):
-                entry["id"] = str(m.id)
-            if getattr(m, 'is_hidden', False):
+            entry = {
+                "role": m.role,
+                "content": m.content,
+                "created_at": m.created_at.isoformat() if m.created_at else None,
+            }
+            if message_id_str:
+                entry["id"] = message_id_str
+            if getattr(m, "is_hidden", False):
                 entry["is_hidden"] = True
             if hasattr(m, 'thinking') and m.thinking:
                 entry["thinking"] = m.thinking

@@ -455,7 +455,7 @@ async def seed_agent_templates():
 
             current_names = {t["name"] for t in templates}
             result = await db.execute(
-                select(AgentTemplate).where(AgentTemplate.is_builtin == True)
+                select(AgentTemplate).where(AgentTemplate.is_builtin)
             )
             existing_builtins = result.scalars().all()
             for old in existing_builtins:
@@ -475,7 +475,7 @@ async def seed_agent_templates():
                 result = await db.execute(
                     select(AgentTemplate).where(
                         AgentTemplate.name == tmpl["name"],
-                        AgentTemplate.is_builtin == True,
+                        AgentTemplate.is_builtin,
                     )
                 )
                 existing = result.scalar_one_or_none()
