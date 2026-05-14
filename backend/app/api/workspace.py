@@ -4,12 +4,14 @@ import logging
 import time
 from collections import defaultdict
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.security import get_current_admin
 from app.database import get_db
+from app.models.user import User
 from app.models.workspace import WorkspaceBugReport, WorkspaceProject
 from app.services.workspace_tools import approve_container_deploy, reject_container_deploy
 
@@ -89,36 +91,58 @@ class ApproveRequest(BaseModel):
     cpus: str = ""
 
 
+def _workspace_scope_args(current_user: User) -> dict:
+    """Resolve tenant scoping for workspace admin actions."""
+    is_platform_admin = current_user.role == "platform_admin" or bool(
+        getattr(getattr(current_user, "identity", None), "is_platform_admin", False)
+    )
+    if is_platform_admin:
+        return {"tenant_id": None, "include_platform_global": True}
+    return {"tenant_id": current_user.tenant_id, "include_platform_global": False}
+
+
 @router.post("/projects/{slug}/approve")
-async def approve_deploy(slug: str, body: ApproveRequest | None = None):
-    """Approve a container deployment (authenticated, under /api/workspace)."""
+async def approve_deploy(
+    slug: str,
+    body: ApproveRequest | None = None,
+    current_user: User = Depends(get_current_admin),
+):
+    """Approve a container deployment (admin only, under /api/workspace)."""
     limits = {}
     if body:
         if body.memory:
             limits["memory"] = body.memory
         if body.cpus:
             limits["cpus"] = body.cpus
-    result = await approve_container_deploy(slug, limits if limits else None)
+    result = await approve_container_deploy(slug, limits if limits else None, **_workspace_scope_args(current_user))
     if not result["ok"]:
-        raise HTTPException(status_code=400, detail=result["error"])
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=result["error"])
     return result
 
 
 @router.post("/projects/{slug}/reject")
-async def reject_deploy(slug: str):
-    """Reject a container deployment (authenticated, under /api/workspace)."""
-    result = await reject_container_deploy(slug)
+async def reject_deploy(
+    slug: str,
+    current_user: User = Depends(get_current_admin),
+):
+    """Reject a container deployment (admin only, under /api/workspace)."""
+    result = await reject_container_deploy(slug, **_workspace_scope_args(current_user))
     if not result["ok"]:
-        raise HTTPException(status_code=400, detail=result["error"])
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=result["error"])
     return result
 
 
 @router.get("/projects")
-async def list_projects(db: AsyncSession = Depends(get_db)):
-    """List all workspace projects."""
-    result = await db.execute(
-        select(WorkspaceProject).order_by(WorkspaceProject.created_at.desc())
-    )
+async def list_projects(
+    current_user: User = Depends(get_current_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """List all workspace projects (admin only)."""
+    scope = _workspace_scope_args(current_user)
+    query = select(WorkspaceProject)
+    if scope["tenant_id"] is not None:
+        query = query.where(WorkspaceProject.tenant_id == scope["tenant_id"])
+    result = await db.execute(query.order_by(WorkspaceProject.created_at.desc()))
     projects = result.scalars().all()
     return [
         {
