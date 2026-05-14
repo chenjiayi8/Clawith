@@ -60,6 +60,12 @@ from app.services import workspace_tools
 from app.core.permissions import evaluate_agent_relationship_status, evaluate_human_relationship_status
 from app.services.access_relationships import ensure_access_granted_platform_relationships
 from app.config import get_settings
+from app.services.llm.finish import (
+    FINISH_PROTOCOL_REMINDER,
+    FINISH_TOOL_DEFINITION,
+    FINISH_TOOL_NAME,
+)
+
 
 
 _settings = get_settings()
@@ -72,35 +78,6 @@ _tool_config_cache: dict[tuple, tuple[dict, datetime]] = {}
 _TOOL_CONFIG_CACHE_TTL_SECONDS = 60
 
 # Sensitive field keys that should be encrypted/decrypted
-
-FINISH_TOOL_NAME = "finish"
-FINISH_TOOL_DEFINITION: dict[str, Any] = {
-    "type": "function",
-    "function": {
-        "name": FINISH_TOOL_NAME,
-        "description": (
-            "Finish the current turn and send the final user-facing response. "
-            "You MUST call this tool exactly when you are ready to stop. Put the full answer "
-            "the user should see in content. Do not call any other tools in the same response."
-        ),
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "content": {
-                    "type": "string",
-                    "description": "The final response to show to the user.",
-                },
-            },
-            "required": ["content"],
-        },
-    },
-}
-FINISH_PROTOCOL_REMINDER = (
-    "Your previous response did not call any tool, so this turn is not finished. "
-    "You must either call another available tool if more work is needed, or call "
-    "`finish` with the complete user-facing answer in `content`. Do not answer in plain text."
-)
-
 
 @dataclass(frozen=True)
 class FinishCall:
@@ -2318,6 +2295,22 @@ async def _agent_has_feishu(agent_id: uuid.UUID) -> bool:
                 select(ChannelConfig).where(
                     ChannelConfig.agent_id == agent_id,
                     ChannelConfig.channel_type == "feishu",
+                    ChannelConfig.is_configured,
+                )
+            )
+            return r.scalar_one_or_none() is not None
+    except Exception:
+        return False
+
+
+async def _agent_has_any_channel(agent_id: uuid.UUID) -> bool:
+    """Check if agent has any configured channel (Feishu/DingTalk/WeCom)."""
+    try:
+        from app.models.channel_config import ChannelConfig
+        async with async_session() as db:
+            r = await db.execute(
+                select(ChannelConfig).where(
+                    ChannelConfig.agent_id == agent_id,
                     ChannelConfig.is_configured,
                 )
             )
@@ -5530,6 +5523,44 @@ async def _send_feishu_message(agent_id: uuid.UUID, args: dict) -> str:
             config = config_result.scalar_one_or_none()
             if not config:
                 return "❌ This agent has no Feishu channel configured"
+
+            async def _save_outgoing_to_feishu_session(feishu_user_id: str, org_member, title_name: str):
+                """Save the outgoing message to the Feishu P2P chat session."""
+                try:
+                    from datetime import datetime as _dt, timezone as _tz
+
+                    agent_r = await db.execute(select(AgentModel).where(AgentModel.id == agent_id))
+                    agent_obj = agent_r.scalar_one_or_none()
+
+                    platform_user = await get_platform_user_by_org_member(
+                        db=db,
+                        org_member=org_member,
+                        agent_tenant_id=agent_obj.tenant_id if agent_obj else None,
+                    )
+                    user_id = platform_user.id
+
+                    ext_conv_id = f"feishu_p2p_{feishu_user_id}"
+                    sess = await find_or_create_channel_session(
+                        db=db,
+                        agent_id=agent_id,
+                        user_id=user_id,
+                        external_conv_id=ext_conv_id,
+                        source_channel="feishu",
+                        first_message_title=f"[Agent → {title_name or feishu_user_id}]",
+                    )
+                    db.add(ChatMessage(
+                        agent_id=agent_id,
+                        user_id=user_id,
+                        role="assistant",
+                        content=message_text,
+                        conversation_id=str(sess.id),
+                    ))
+                    sess.last_message_at = _dt.now(_tz.utc)
+                    await db.commit()
+                    logger.info(f"[Feishu] Saved outgoing message to session {sess.id} (user_id: {feishu_user_id})")
+                except Exception as e:
+                    logger.error(f"[Feishu] Failed to save outgoing message to history: {e}")
+
             if direct_user_id and not member_name:
                 rel_result = await db.execute(
                     select(AgentRelationship)
@@ -5555,6 +5586,12 @@ async def _send_feishu_message(agent_id: uuid.UUID, args: dict) -> str:
                         receive_id_type="user_id",
                     )
                     if resp.get("code") == 0:
+                        # Save to history session
+                        await _save_outgoing_to_feishu_session(
+                            direct_user_id,
+                            direct_rel.member if direct_rel else None,
+                            direct_rel.member.name if direct_rel and direct_rel.member else direct_user_id,
+                        )
                         return f"✅ 消息已发送（user_id: {direct_user_id}）"
                     return f"❌ 发送失败：{resp.get('msg')} (code {resp.get('code')})"
                 except FeishuAPIError as user_id_err:
@@ -5594,49 +5631,14 @@ async def _send_feishu_message(agent_id: uuid.UUID, args: dict) -> str:
                     content=content, receive_id_type=id_type,
                 )
 
-            async def _save_outgoing_to_feishu_session(feishu_user_id: str):
-                """Save the outgoing message to the Feishu P2P chat session."""
-                try:
-                    from datetime import datetime as _dt, timezone as _tz
-
-
-                    agent_r = await db.execute(select(AgentModel).where(AgentModel.id == agent_id))
-                    agent_obj = agent_r.scalar_one_or_none()
-
-                    # Get or create platform user from OrgMember (unified logic)
-                    platform_user = await get_platform_user_by_org_member(
-                        db=db,
-                        org_member=target_member,
-                        agent_tenant_id=agent_obj.tenant_id if agent_obj else None,
-                    )
-                    user_id = platform_user.id
-
-                    ext_conv_id = f"feishu_p2p_{feishu_user_id}"
-                    sess = await find_or_create_channel_session(
-                        db=db,
-                        agent_id=agent_id,
-                        user_id=user_id,
-                        external_conv_id=ext_conv_id,
-                        source_channel="feishu",
-                        first_message_title=f"[Agent → {member_name or feishu_user_id}]",
-                    )
-                    db.add(ChatMessage(
-                        agent_id=agent_id,
-                        user_id=user_id,
-                        role="assistant",
-                        content=message_text,
-                        conversation_id=str(sess.id),
-                    ))
-                    sess.last_message_at = _dt.now(_tz.utc)
-                    await db.commit()
-                    logger.info(f"[Feishu] Saved outgoing message to session {sess.id} (user_id: {feishu_user_id})")
-                except Exception as e:
-                    logger.error(f"[Feishu] Failed to save outgoing message to history: {e}")
-
             try:
                 resp = await _try_send(config.app_id, config.app_secret, target_member.external_id, "user_id")
                 if resp.get("code") == 0:
-                    await _save_outgoing_to_feishu_session(target_member.external_id)
+                    await _save_outgoing_to_feishu_session(
+                        target_member.external_id,
+                        target_member,
+                        member_name or target_member.external_id,
+                    )
                     return f"✅ Successfully sent message to {member_name}"
                 logger.info(f"❌ Failed to send message to {target_member.external_id} via Feishu (user_id): {resp}")
                 return f"发送失败: {resp.get('msg')} (code {resp.get('code')})"

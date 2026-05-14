@@ -49,6 +49,7 @@ export interface FileBrowserProps {
     readOnly?: boolean;
     onRefresh?: () => void;
     onPathChange?: (path: string) => void;
+    refreshToken?: number;
 }
 
 // ─── Text file detection ───────────────────────────────
@@ -82,6 +83,7 @@ export default function FileBrowser({
     readOnly = false,
     onRefresh,
     onPathChange,
+    refreshToken,
 }: FileBrowserProps) {
     const { t } = useTranslation();
     const {
@@ -123,6 +125,8 @@ export default function FileBrowser({
     const [zipUploading, setZipUploading] = useState(false);
     const textareaRef = useRef<HTMLTextAreaElement>(null);
 
+ 
+
     // Auto-resize textarea to match content height
     useEffect(() => {
         const el = textareaRef.current;
@@ -139,7 +143,7 @@ export default function FileBrowser({
         setTimeout(() => setToast(null), 3000);
     }, []);
 
-    // ─── Load files ───────────────────────────────────
+ 
 
     const reload = useCallback(async () => {
         if (singleFile) {
@@ -191,7 +195,7 @@ export default function FileBrowser({
         accept: uploadAccept,
     });
 
-    useEffect(() => { reload(); }, [reload]);
+    useEffect(() => { reload(); }, [reload, refreshToken]);
 
     // ─── Load file content when viewing ───────────────
 
@@ -741,7 +745,7 @@ export default function FileBrowser({
                                         <IconDownload size={13} stroke={1.8} />
                                     </a>
                                 )}
-                                {canDelete && !f.is_dir && (
+                                {canDelete && (
                                     <button className="btn btn-ghost" style={{ padding: '2px 6px', fontSize: '11px', color: 'var(--error)' }}
                                         onClick={(e) => { e.stopPropagation(); setDeleteTarget({ path: f.path || `${currentPath}/${f.name}`, name: f.name }); }}>
                                         ×

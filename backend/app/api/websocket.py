@@ -5,14 +5,15 @@ import re
 import uuid
 from datetime import datetime, timezone as tz
 
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Query
+from fastapi import APIRouter, Depends, Query, WebSocket, WebSocketDisconnect
 from loguru import logger
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.security import decode_access_token
 from app.core.permissions import check_agent_access, is_agent_expired
-from app.database import async_session
+from app.core.security import get_current_user
+from app.database import async_session, get_db
 from app.models.agent import Agent
 from app.models.audit import ChatMessage
 from app.models.chat_session import ChatSession
@@ -258,6 +259,34 @@ class ConnectionManager:
 manager = ConnectionManager()
 
 
+def _should_generate_session_title(
+    needs_session_title_generation: bool,
+    skip_user_save: bool,
+    is_onboarding_trigger: bool,
+) -> bool:
+    """Only title the first persisted non-onboarding user exchange."""
+    return needs_session_title_generation and not skip_user_save and not is_onboarding_trigger
+
+
+def _rewrite_edited_user_content(original_content: str, replacement_text: str) -> str:
+    """Preserve attachment/banner wrapper lines when editing a user message body."""
+    preserved_prefix: list[str] = []
+    for line in original_content.splitlines():
+        stripped = line.strip()
+        if (
+            stripped.startswith("[file:")
+            or stripped.startswith("[image_data:")
+            or stripped.startswith("[Attachment:")
+        ):
+            preserved_prefix.append(line)
+            continue
+        break
+
+    if preserved_prefix:
+        return "\n".join([*preserved_prefix, replacement_text])
+    return replacement_text
+
+
 async def maybe_mark_session_read_for_active_viewer(
     db: AsyncSession,
     *,
@@ -275,11 +304,6 @@ async def maybe_mark_session_read_for_active_viewer(
 
     session.last_read_at_by_user = datetime.now(tz.utc)
     return True
-
-
-from fastapi import Depends
-from app.core.security import get_current_user
-from app.database import get_db
 
 
 @router.get("/api/chat/{agent_id}/history")
@@ -365,6 +389,7 @@ async def websocket_chat(
     llm_model = None
     fallback_llm_model = None
     history_messages = []
+    needs_session_title_generation = False
 
     try:
         async with async_session() as db:
@@ -377,6 +402,7 @@ async def websocket_chat(
                 await websocket.close(code=4001)
                 return
 
+            _tenant_id = user.tenant_id  # Capture for title generation
             logger.info(f"[WS] Checking agent access for {agent_id}")
             agent, _ = await check_agent_access(db, user, agent_id)
             # Check agent expiry
@@ -384,6 +410,7 @@ async def websocket_chat(
                 await websocket.send_json({"type": "error", "content": "This Agent has expired and is off duty. Please contact your admin to extend its service."})
                 await websocket.close(code=4003)
                 return
+            _tenant_id = user.tenant_id  # Capture for title generation
             agent_name = agent.name
             agent_type = agent.agent_type or ""
             role_description = agent.role_description or ""
@@ -486,6 +513,7 @@ async def websocket_chat(
                 )
                 history_messages = list(reversed(history_result.scalars().all()))
                 logger.info(f"[WS] Loaded {len(history_messages)} history messages for session {conv_id}")
+                needs_session_title_generation = not history_messages
             except Exception as e:
                 logger.warning(f"[WS] History load failed (non-fatal): {e}")
     except Exception as e:
@@ -756,8 +784,9 @@ async def websocket_chat(
                 await websocket.send_json({"type": "done", "role": "assistant", "content": f"⚠️ {ae.message}"})
                 continue
 
-            # Add user message to conversation (full LLM context)
-            conversation.append({"role": "user", "content": content})
+            if not skip_user_save:
+                # Add user message to conversation (full LLM context)
+                conversation.append({"role": "user", "content": content})
 
             # Save user message to DB.
             #
@@ -1299,6 +1328,44 @@ async def websocket_chat(
                     "message_id": assistant_msg_id,
                 }
             )
+
+            # Re-process any queued messages (if user sent something during generation)
+            for qm in queued_messages:
+                # In a real implementation, you might want to push these back to the main loop
+                pass
+
+            # ── Auto-generate session title on first real exchange only ──
+            if _should_generate_session_title(needs_session_title_generation, skip_user_save, is_onboarding_trigger) and _tenant_id:
+                try:
+                    from app.models.tenant import Tenant as _Tenant
+                    from app.models.llm import LLMModel as _LLM
+                    import asyncio as _asyncio
+                    async with async_session() as _tdb:
+                        _t_r = await _tdb.execute(
+                            select(_Tenant).where(_Tenant.id == _tenant_id)
+                        )
+                        _tenant = _t_r.scalar_one_or_none()
+                        if _tenant and _tenant.utility_model_id:
+                            _m_r = await _tdb.execute(
+                                select(_LLM).where(_LLM.id == _tenant.utility_model_id)
+                            )
+                            _util_model = _m_r.scalar_one_or_none()
+                            if _util_model:
+                                from app.services.session_title import generate_session_title
+                                _first_user_msg = display_content if display_content else content
+                                _asyncio.create_task(
+                                    generate_session_title(
+                                        session_id=conv_id,
+                                        user_message=_first_user_msg,
+                                        assistant_response=assistant_response[:500],
+                                        utility_model=_util_model,
+                                        websocket=websocket,
+                                    )
+                                )
+                        needs_session_title_generation = False
+                except Exception as _e:
+                    logger.warning(f"[WS] Title generation trigger failed: {_e}")
+                needs_session_title_generation = False
 
             # Re-process any queued messages (if user sent something during generation)
             for qm in queued_messages:

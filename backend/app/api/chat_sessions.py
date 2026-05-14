@@ -2,6 +2,7 @@
 
 import uuid
 from datetime import datetime, timezone as tz
+import re
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -476,9 +477,6 @@ async def get_session_messages(
             out.append(entry)
 
     return out
-
-
-import re
 
 def _split_inline_tools(content: str) -> list[dict]:
     """Parse assistant content containing inline ```tool_code blocks.

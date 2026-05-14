@@ -44,6 +44,10 @@ def _tenant(tenant_id: uuid.UUID, utility_model_id: uuid.UUID | None = None):
     )
 
 
+def _model(model_id: uuid.UUID, tenant_id: uuid.UUID, enabled: bool = True):
+    return SimpleNamespace(id=model_id, tenant_id=tenant_id, enabled=enabled)
+
+
 @pytest.mark.asyncio
 async def test_get_tenant_quotas_platform_admin_can_read_selected_tenant():
     selected_tenant_id = uuid.uuid4()
@@ -80,8 +84,9 @@ async def test_update_tenant_quotas_platform_admin_can_set_selected_tenant_utili
     selected_tenant_id = uuid.uuid4()
     utility_model_id = uuid.uuid4()
     tenant = _tenant(selected_tenant_id)
+    model = _model(utility_model_id, selected_tenant_id)
     current_user = SimpleNamespace(role="platform_admin", tenant_id=uuid.uuid4(), identity=None)
-    db = RecordingDB([DummyResult([tenant])])
+    db = RecordingDB([DummyResult([tenant]), DummyResult([model])])
     monkeypatch.setattr(enterprise_api, "enforce_heartbeat_floor", AsyncMock(return_value=0), raising=False)
 
     result = await enterprise_api.update_tenant_quotas(

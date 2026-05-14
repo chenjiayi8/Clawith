@@ -377,7 +377,7 @@ async def list_approvals(
         tenant_agent_ids = select(Agent.id).where(Agent.tenant_id == tid)
         query = query.where(ApprovalRequest.agent_id.in_(tenant_agent_ids))
     # Non-admins further restricted to their own agents
-    if current_user.role != "platform_admin":
+    if getattr(current_user, "role", None) != "platform_admin":
         query = query.where(ApprovalRequest.agent_id.in_(
             select(Agent.id).where(Agent.creator_id == current_user.id)
         ))
@@ -522,6 +522,21 @@ def _resolve_quota_tenant_id(current_user: User, tenant_id: str | None) -> uuid.
     return None
 
 
+
+
+def _resolve_tenant_quota_target(
+    current_user: User,
+    tenant_id: str | None,
+) -> uuid.UUID:
+    if tenant_id:
+        if getattr(current_user, "role", None) != "platform_admin":
+            if not current_user.tenant_id or str(current_user.tenant_id) != tenant_id:
+                raise HTTPException(status_code=403, detail="Not allowed")
+        return uuid.UUID(tenant_id)
+    if not current_user.tenant_id:
+        raise HTTPException(status_code=400, detail="No tenant assigned")
+    return current_user.tenant_id
+
 @router.get("/tenant-quotas")
 async def get_tenant_quotas(
     tenant_id: str | None = None,
@@ -594,10 +609,22 @@ async def update_tenant_quotas(
         tenant.min_poll_interval_floor = data.min_poll_interval_floor
     if data.max_webhook_rate_ceiling is not None:
         tenant.max_webhook_rate_ceiling = data.max_webhook_rate_ceiling
+
     if data.utility_model_id is not None:
-        tenant.utility_model_id = (
-            None if data.utility_model_id == "" else uuid.UUID(data.utility_model_id)
-        )
+        if data.utility_model_id == "":
+            tenant.utility_model_id = None
+        else:
+            import uuid as _uuid
+            model_id = _uuid.UUID(data.utility_model_id)
+            model_result = await db.execute(select(LLMModel).where(LLMModel.id == model_id))
+            model = model_result.scalar_one_or_none()
+            if not model:
+                raise HTTPException(status_code=404, detail="Model not found")
+            if not model.tenant_id or model.tenant_id != resolved_tenant_id:
+                raise HTTPException(status_code=400, detail="Model is not tenant-scoped to this tenant")
+            if not model.enabled:
+                raise HTTPException(status_code=400, detail="Model is disabled")
+            tenant.utility_model_id = model.id
 
     await db.commit()
     return {

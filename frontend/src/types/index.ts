@@ -9,7 +9,6 @@ export interface User {
     role: 'platform_admin' | 'org_admin' | 'agent_admin' | 'member';
     is_platform_admin?: boolean;
     tenant_id?: string;
-    department_id?: string;
     title?: string;
     feishu_open_id?: string;
     is_active: boolean;

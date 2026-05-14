@@ -9,25 +9,32 @@ from app.database import Base, engine
 # Import all models so Base.metadata is fully populated before create_all.
 import app.models.activity_log  # noqa: F401
 import app.models.agent  # noqa: F401
+import app.models.agent_credential  # noqa: F401
 import app.models.audit  # noqa: F401
 import app.models.channel_config  # noqa: F401
 import app.models.chat_session  # noqa: F401
+import app.models.focus  # noqa: F401
 import app.models.gateway_message  # noqa: F401
+import app.models.identity  # noqa: F401
 import app.models.invitation_code  # noqa: F401
 import app.models.llm  # noqa: F401
 import app.models.notification  # noqa: F401
+import app.models.okr  # noqa: F401
 import app.models.onboarding  # noqa: F401
 import app.models.org  # noqa: F401
 import app.models.participant  # noqa: F401
 import app.models.plaza  # noqa: F401
+import app.models.published_page  # noqa: F401
 import app.models.schedule  # noqa: F401
 import app.models.skill  # noqa: F401
 import app.models.system_settings  # noqa: F401
 import app.models.task  # noqa: F401
 import app.models.tenant  # noqa: F401
+import app.models.tenant_setting  # noqa: F401
 import app.models.tool  # noqa: F401
 import app.models.trigger  # noqa: F401
 import app.models.user  # noqa: F401
+import app.models.workspace  # noqa: F401
 
 
 PATCHES = [

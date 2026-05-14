@@ -166,3 +166,4 @@ def test_onboarding_migration_skips_existing_table_creation():
     ).read_text(encoding="utf-8")
 
     assert "has_table" in migration_text
+
