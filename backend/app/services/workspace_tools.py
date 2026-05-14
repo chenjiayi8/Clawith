@@ -65,6 +65,66 @@ async def check_slug_available(slug: str) -> str | None:
             return f"Slug '{slug}' is already in use."
     return None
 
+
+def _normalize_build_request(arguments: dict) -> tuple[str, str, str]:
+    """Extract normalized build-request fields from tool arguments."""
+    return (
+        arguments.get("slug", "").strip(),
+        arguments.get("name", "").strip(),
+        arguments.get("description", "").strip(),
+    )
+
+
+async def _validate_build_request(slug: str, name: str, description: str) -> str | None:
+    """Validate common build-request fields before writing the project row."""
+    if not name or not description:
+        return "Error: 'name' and 'description' are required."
+
+    slug_error = validate_slug(slug)
+    if slug_error:
+        return f"Error: {slug_error}"
+
+    avail_error = await check_slug_available(slug)
+    if avail_error:
+        return f"Error: {avail_error}"
+
+    return None
+
+
+async def _create_build_request_record(
+    *,
+    slug: str,
+    name: str,
+    description: str,
+    tenant_id: uuid.UUID | None = None,
+    requested_by: uuid.UUID | None = None,
+    requested_by_human: str | None = None,
+) -> str | None:
+    """Persist a pending build request and normalize duplicate-slug failures."""
+    try:
+        async with async_session() as db:
+            project = WorkspaceProject(
+                slug=slug,
+                name=name,
+                description=description,
+                tenant_id=tenant_id,
+                requested_by=requested_by,
+                requested_by_human=requested_by_human,
+                status="requested",
+            )
+            db.add(project)
+            await db.commit()
+    except IntegrityError:
+        return f"Error: Slug '{slug}' is already in use."
+
+    return None
+
+
+def _format_build_requester(project: WorkspaceProject) -> str:
+    """Render the human-friendly requester label for a pending build request."""
+    return project.requested_by_human or f"Agent {project.requested_by}"
+
+
 def _get_docker_client():
     """Get a Docker client connected via the mounted socket. Lazy import to avoid import-time failure."""
     import docker
@@ -101,37 +161,22 @@ async def tool_request_build(
     agent_id: uuid.UUID, arguments: dict
 ) -> str:
     """Create a build request for the SE agent."""
-    slug = arguments.get("slug", "").strip()
-    name = arguments.get("name", "").strip()
-    description = arguments.get("description", "").strip()
+    slug, name, description = _normalize_build_request(arguments)
 
-    if not name or not description:
-        return "Error: 'name' and 'description' are required."
-
-    slug_error = validate_slug(slug)
-    if slug_error:
-        return f"Error: {slug_error}"
-
-    avail_error = await check_slug_available(slug)
-    if avail_error:
-        return f"Error: {avail_error}"
+    validation_error = await _validate_build_request(slug, name, description)
+    if validation_error:
+        return validation_error
 
     tenant_id = await _get_agent_tenant_id(agent_id)
-
-    try:
-        async with async_session() as db:
-            project = WorkspaceProject(
-                slug=slug,
-                name=name,
-                description=description,
-                tenant_id=tenant_id,
-                requested_by=agent_id,
-                status="requested",
-            )
-            db.add(project)
-            await db.commit()
-    except IntegrityError:
-        return f"Error: Slug '{slug}' is already in use."
+    create_error = await _create_build_request_record(
+        slug=slug,
+        name=name,
+        description=description,
+        tenant_id=tenant_id,
+        requested_by=agent_id,
+    )
+    if create_error:
+        return create_error
 
     return (
         f"Build request created!\n"
@@ -146,35 +191,21 @@ async def tool_request_build_human(
     arguments: dict,
 ) -> str:
     """Create a build request from a human (no agent_id)."""
-    slug = arguments.get("slug", "").strip()
-    name = arguments.get("name", "").strip()
-    description = arguments.get("description", "").strip()
+    slug, name, description = _normalize_build_request(arguments)
     requester = arguments.get("requester", "").strip() or "Frank"
 
-    if not name or not description:
-        return "Error: 'name' and 'description' are required."
+    validation_error = await _validate_build_request(slug, name, description)
+    if validation_error:
+        return validation_error
 
-    slug_error = validate_slug(slug)
-    if slug_error:
-        return f"Error: {slug_error}"
-
-    avail_error = await check_slug_available(slug)
-    if avail_error:
-        return f"Error: {avail_error}"
-
-    try:
-        async with async_session() as db:
-            project = WorkspaceProject(
-                slug=slug,
-                name=name,
-                description=description,
-                requested_by_human=requester,
-                status="requested",
-            )
-            db.add(project)
-            await db.commit()
-    except IntegrityError:
-        return f"Error: Slug '{slug}' is already in use."
+    create_error = await _create_build_request_record(
+        slug=slug,
+        name=name,
+        description=description,
+        requested_by_human=requester,
+    )
+    if create_error:
+        return create_error
 
     return f"Build request '{name}' created for slug '{slug}'."
 
@@ -193,12 +224,11 @@ async def tool_list_build_requests() -> str:
         return "No pending build requests."
 
     lines = ["Pending build requests:\n"]
-    for p in projects:
-        requester = p.requested_by_human or f"Agent {p.requested_by}"
+    for project in projects:
         lines.append(
-            f"- [{p.slug}] {p.name}\n"
-            f"  Requested by: {requester}\n"
-            f"  Description: {p.description}\n"
+            f"- [{project.slug}] {project.name}\n"
+            f"  Requested by: {_format_build_requester(project)}\n"
+            f"  Description: {project.description}\n"
         )
     return "\n".join(lines)
 
