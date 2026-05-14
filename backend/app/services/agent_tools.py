@@ -3061,7 +3061,7 @@ async def execute_tool(
         elif tool_name == "request_build":
             result = await workspace_tools.tool_request_build(agent_id, arguments)
         elif tool_name == "list_build_requests":
-            result = await workspace_tools.tool_list_build_requests()
+            result = await workspace_tools.tool_list_build_requests(agent_id)
         elif tool_name == "deploy_static":
             result = await workspace_tools.tool_deploy_static(agent_id, ws, arguments)
         elif tool_name == "request_container_deploy":

@@ -1,4 +1,5 @@
 import uuid
+import ast
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -95,6 +96,58 @@ async def test_list_workspace_projects_is_tenant_scoped(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_list_build_requests_is_tenant_scoped(monkeypatch):
+    tenant_id = uuid.uuid4()
+    project = SimpleNamespace(
+        slug="demo",
+        name="Demo",
+        description="Build me",
+        requested_by_human="Frank",
+    )
+    db = RecordingDB([DummyResult([project])])
+
+    monkeypatch.setattr(workspace_tools, "_get_agent_tenant_id", AsyncMock(return_value=tenant_id))
+    monkeypatch.setattr(workspace_tools, "async_session", lambda: SessionCtx(db))
+
+    result = await workspace_tools.tool_list_build_requests(uuid.uuid4())
+
+    assert "workspace_projects.status = " in db.statements[0]
+    assert "workspace_projects.tenant_id =" in db.statements[0]
+    assert "[demo]" in result
+
+
+def test_agent_tools_dispatch_passes_agent_id_for_list_build_requests():
+    source = Path("app/services/agent_tools.py").read_text(encoding="utf-8")
+    tree = ast.parse(source)
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.If):
+            test = node.test
+            if (
+                isinstance(test, ast.Compare)
+                and isinstance(test.left, ast.Name)
+                and test.left.id == "tool_name"
+                and len(test.ops) == 1
+                and isinstance(test.ops[0], ast.Eq)
+                and len(test.comparators) == 1
+                and isinstance(test.comparators[0], ast.Constant)
+                and test.comparators[0].value == "list_build_requests"
+            ):
+                call = node.body[0].value
+                assert isinstance(call, ast.Await)
+                awaited = call.value
+                assert isinstance(awaited, ast.Call)
+                assert isinstance(awaited.func, ast.Attribute)
+                assert awaited.func.attr == "tool_list_build_requests"
+                assert len(awaited.args) == 1
+                assert isinstance(awaited.args[0], ast.Name)
+                assert awaited.args[0].id == "agent_id"
+                return
+
+    raise AssertionError("list_build_requests dispatch branch not found")
+
+
+@pytest.mark.asyncio
 async def test_resolve_bug_is_tenant_scoped(monkeypatch):
     tenant_id = uuid.uuid4()
     bug_id = uuid.uuid4()
@@ -110,4 +163,3 @@ async def test_resolve_bug_is_tenant_scoped(monkeypatch):
     assert report.status == "fixed"
     assert db.commits == 1
     assert "marked as fixed" in result
-

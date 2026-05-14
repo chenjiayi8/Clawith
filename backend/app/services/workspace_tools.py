@@ -179,14 +179,13 @@ async def tool_request_build_human(
     return f"Build request '{name}' created for slug '{slug}'."
 
 
-async def tool_list_build_requests() -> str:
+async def tool_list_build_requests(agent_id: uuid.UUID) -> str:
     """List pending build requests."""
+    tenant_id = await _get_agent_tenant_id(agent_id)
     async with async_session() as db:
-        result = await db.execute(
-            select(WorkspaceProject)
-            .where(WorkspaceProject.status == "requested")
-            .order_by(WorkspaceProject.created_at.asc())
-        )
+        query = select(WorkspaceProject).where(WorkspaceProject.status == "requested")
+        query = _scope_workspace_project_query(query, tenant_id, include_platform_global=False)
+        result = await db.execute(query.order_by(WorkspaceProject.created_at.asc()))
         projects = result.scalars().all()
 
     if not projects:
