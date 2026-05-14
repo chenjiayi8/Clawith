@@ -94,3 +94,59 @@ async def test_update_tenant_quotas_rejects_disabled_or_wrong_tenant_utility_mod
 
         assert exc.value.status_code == 400
         assert db.committed is False
+
+
+@pytest.mark.asyncio
+async def test_platform_admin_can_target_selected_tenant_quotas():
+    admin_tenant_id = uuid.uuid4()
+    target_tenant_id = uuid.uuid4()
+    current_user = SimpleNamespace(role="platform_admin", tenant_id=admin_tenant_id)
+    tenant = SimpleNamespace(id=target_tenant_id, utility_model_id=None)
+    model = SimpleNamespace(id=uuid.uuid4(), tenant_id=target_tenant_id, enabled=True)
+    db = RecordingDB(
+        responses=[
+            DummyResult([tenant]),
+            DummyResult([model]),
+        ]
+    )
+
+    result = await enterprise_api.update_tenant_quotas(
+        data=enterprise_api.TenantQuotaUpdate(utility_model_id=str(model.id)),
+        tenant_id=str(target_tenant_id),
+        current_user=current_user,
+        db=db,
+    )
+
+    assert tenant.utility_model_id == model.id
+    assert result["message"] == "Tenant quotas updated"
+    assert db.committed is True
+
+
+@pytest.mark.asyncio
+async def test_get_tenant_quotas_honors_selected_tenant_for_platform_admin():
+    admin_tenant_id = uuid.uuid4()
+    target_tenant_id = uuid.uuid4()
+    current_user = SimpleNamespace(role="platform_admin", tenant_id=admin_tenant_id)
+    tenant = SimpleNamespace(
+        id=target_tenant_id,
+        default_message_limit=1,
+        default_message_period="permanent",
+        default_max_agents=2,
+        default_agent_ttl_hours=0,
+        default_max_llm_calls_per_day=3,
+        min_heartbeat_interval_minutes=4,
+        default_max_triggers=5,
+        min_poll_interval_floor=6,
+        max_webhook_rate_ceiling=7,
+        utility_model_id=None,
+    )
+    db = RecordingDB(responses=[DummyResult([tenant])])
+
+    result = await enterprise_api.get_tenant_quotas(
+        tenant_id=str(target_tenant_id),
+        current_user=current_user,
+        db=db,
+    )
+
+    assert result["default_message_limit"] == 1
+    assert result["utility_model_id"] is None

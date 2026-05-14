@@ -46,6 +46,7 @@ export interface FileBrowserProps {
     readOnly?: boolean;
     onRefresh?: () => void;
     onPathChange?: (path: string) => void;
+    refreshToken?: number;
 }
 
 // ─── Text file detection ───────────────────────────────
@@ -79,6 +80,7 @@ export default function FileBrowser({
     readOnly = false,
     onRefresh,
     onPathChange,
+    refreshToken,
 }: FileBrowserProps) {
     const { t } = useTranslation();
     const {
@@ -158,6 +160,10 @@ export default function FileBrowser({
         }
         setLoading(false);
     }, [api, currentPath, singleFile, fileFilter]);
+
+    useEffect(() => {
+        reload();
+    }, [reload, refreshToken]);
 
     // ─── Drag-and-drop upload ─────────────────────
     const handleDroppedFiles = useCallback(async (files: File[]) => {

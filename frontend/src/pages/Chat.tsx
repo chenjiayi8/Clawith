@@ -416,7 +416,7 @@ export default function Chat() {
                     const processed: Message[] = [];
                     for (const h of history) {
                         if (h.is_hidden) {
-                            const firstLine = (h.content || '').split('\n')[0].replace(/^#\s*/, '').trim();
+                            const firstLine = (h.content || '').split('\n').find((line: string) => { const trimmed = line.trim(); return trimmed && trimmed !== '---'; })?.replace(/^#\s*/, '').trim();
                             processed.push({
                                 role: 'assistant',
                                 content: firstLine || 'Skill loaded',

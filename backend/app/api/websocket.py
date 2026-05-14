@@ -64,6 +64,51 @@ async def _resolve_skill_content(
     return content, entry.get("name", skill_key), entry.get("emoji", "")
 
 
+
+
+def _should_generate_session_title(
+    needs_session_title_generation: bool,
+    skip_user_save: bool,
+    is_onboarding_trigger: bool,
+) -> bool:
+    return needs_session_title_generation and not skip_user_save and not is_onboarding_trigger
+
+
+def _rewrite_edited_user_content(original_content: str, new_visible_content: str) -> str:
+    if not original_content:
+        return new_visible_content
+
+    prefix = ''
+    body = original_content
+    if original_content.startswith('[file:'):
+        newline_idx = original_content.find('\n')
+        if newline_idx != -1:
+            prefix = original_content[:newline_idx + 1]
+            body = original_content[newline_idx + 1:]
+
+    def _is_wrapper_line(line: str) -> bool:
+        return (
+            line.startswith('[image_data:')
+            or line.startswith('[Attachment:')
+            or line.startswith('[附件:')
+            or line.startswith('[图片]')
+            or line.startswith('[Attachment]')
+            or line.startswith('[图片文件已上传:')
+            or line.startswith('[文件已上传:')
+            or line.startswith('[Workspace reference:')
+        )
+
+    lines = body.splitlines()
+    preserved: list[str] = []
+    while lines and _is_wrapper_line(lines[0].strip()):
+        preserved.append(lines.pop(0))
+
+    rebuilt_body = new_visible_content
+    if preserved:
+        rebuilt_body = '\n'.join(preserved + ([new_visible_content] if new_visible_content else []))
+
+    return f'{prefix}{rebuilt_body}' if prefix else rebuilt_body
+
 async def _persist_and_inject_skill(
     skill_content: str,
     agent_id: uuid.UUID,
@@ -325,6 +370,7 @@ async def websocket_chat(
     llm_model = None
     fallback_llm_model = None
     history_messages = []
+    needs_session_title_generation = False
 
     try:
         async with async_session() as db:
@@ -448,6 +494,7 @@ async def websocket_chat(
                 )
                 history_messages = list(reversed(history_result.scalars().all()))
                 logger.info(f"[WS] Loaded {len(history_messages)} history messages for session {conv_id}")
+                needs_session_title_generation = not history_messages
             except Exception as e:
                 logger.warning(f"[WS] History load failed (non-fatal): {e}")
     except Exception as e:
@@ -555,7 +602,8 @@ async def websocket_chat(
                             ChatMessage.id != edit_msg.id,
                         )
                     )
-                    edit_msg.content = edit_content
+                    rewritten_content = _rewrite_edited_user_content(edit_msg.content, edit_content)
+                    edit_msg.content = rewritten_content
                     await db.commit()
 
                     rebuild_result = await db.execute(
@@ -567,13 +615,15 @@ async def websocket_chat(
                     _rebuild_conversation_from_messages(rebuild_msgs, conversation, websocket)
                     await websocket.send_json({"type": "edit_ack", "message_id": str(edit_msg.id)})
 
-                content = edit_content
-                display_content = ""
+                content = rewritten_content
+                display_content = edit_content
                 file_name = ""
+                is_onboarding_trigger = False
                 skip_user_save = True
                 logger.info(f"[WS] Edit applied for message {edit_message_id}")
             else:
                 skip_user_save = False
+                is_onboarding_trigger = False
                 content = data.get("content", "")
                 display_content = data.get("display_content", "")  # User-facing display text
                 file_name = data.get("file_name", "")  # Original file name for attachment display
@@ -1167,8 +1217,8 @@ async def websocket_chat(
             })
             logger.info("[WS] Response done sent to client")
 
-            # ── Auto-generate session title on first exchange ──
-            if not history_messages and _tenant_id:
+            # ── Auto-generate session title on first real exchange only ──
+            if _should_generate_session_title(needs_session_title_generation, skip_user_save, is_onboarding_trigger) and _tenant_id:
                 try:
                     from app.models.tenant import Tenant as _Tenant
                     from app.models.llm import LLMModel as _LLM
@@ -1195,8 +1245,10 @@ async def websocket_chat(
                                         websocket=websocket,
                                     )
                                 )
+                        needs_session_title_generation = False
                 except Exception as _e:
                     logger.warning(f"[WS] Title generation trigger failed: {_e}")
+                needs_session_title_generation = False
 
             # Re-process any queued messages (if user sent something during generation)
             for qm in queued_messages:

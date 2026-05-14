@@ -163,7 +163,7 @@ export default function EnterpriseSettings() {
     const [quotaSaved, setQuotaSaved] = useState(false);
     useEffect(() => {
         if (activeTab === 'quotas') {
-            fetchJson<any>('/enterprise/tenant-quotas').then(d => {
+            fetchJson<any>(`/enterprise/tenant-quotas${selectedTenantId ? `?tenant_id=${selectedTenantId}` : ''}`).then(d => {
                 if (d && Object.keys(d).length) setQuotaForm(f => ({ ...f, ...d }));
             }).catch(() => { });
         }
@@ -171,7 +171,7 @@ export default function EnterpriseSettings() {
     const saveQuotas = async () => {
         setQuotaSaving(true);
         try {
-            await fetchJson('/enterprise/tenant-quotas', { method: 'PATCH', body: JSON.stringify(quotaForm) });
+            await fetchJson(`/enterprise/tenant-quotas${selectedTenantId ? `?tenant_id=${selectedTenantId}` : ''}`, { method: 'PATCH', body: JSON.stringify(quotaForm) });
             setQuotaSaved(true); setTimeout(() => setQuotaSaved(false), 2000);
         } catch (e: any) { toast.error('保存失败', { details: String(e?.message || e) }); }
         setQuotaSaving(false);

@@ -75,6 +75,8 @@ export default function SkillsTab(props: Props) {
     const [zipRootName, setZipRootName] = useState('');
     const [zipUploading, setZipUploading] = useState(false);
     const [skillsBrowserPath, setSkillsBrowserPath] = useState('skills');
+    const [browserRefreshToken, setBrowserRefreshToken] = useState(0);
+    const refreshSkillBrowser = () => setBrowserRefreshToken((v) => v + 1);
     const adapter: FileBrowserApi = {
         list: (path) => fileApi.list(agentId, path),
         read: (path) => fileApi.read(agentId, path),
@@ -144,7 +146,7 @@ export default function SkillsTab(props: Props) {
                 </div>
             </div>
 
-            <FileBrowser api={adapter} rootPath="skills" features={{ newFile: true, edit: true, delete: canManage, newFolder: true, upload: true, directoryNavigation: true }} title={t('agent.skills.skillFiles')} onPathChange={setSkillsBrowserPath} />
+            <FileBrowser api={adapter} rootPath="skills" features={{ newFile: true, edit: true, delete: canManage, newFolder: true, upload: true, directoryNavigation: true }} title={t('agent.skills.skillFiles')} onPathChange={setSkillsBrowserPath} refreshToken={browserRefreshToken} />
 
             {showAgentClawhub && (
                 <div style={{ position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, background: 'rgba(0,0,0,0.5)', zIndex: 1000, display: 'flex', alignItems: 'center', justifyContent: 'center' }} onClick={() => setShowAgentClawhub(false)}>
@@ -200,6 +202,7 @@ export default function SkillsTab(props: Props) {
                                                 const response = await skillApi.agentImport.fromClawhub(agentId, result.slug);
                                                 toast.success(`已安装 "${result.displayName || result.slug}"（${response.files_written} 个文件）`);
                                                 queryClient.invalidateQueries({ queryKey: ['files', agentId, 'skills'] });
+                                                refreshSkillBrowser();
                                             } catch (err: any) {
                                                 await dialog.alert('安装失败', { type: 'error', details: String(err?.message || err) });
                                             } finally {
@@ -244,6 +247,7 @@ export default function SkillsTab(props: Props) {
                                         const response = await skillApi.agentImport.fromUrl(agentId, agentUrlInput.trim());
                                         toast.success(`已导入 ${response.files_written} 个文件`);
                                         queryClient.invalidateQueries({ queryKey: ['files', agentId, 'skills'] });
+                                                refreshSkillBrowser();
                                         setShowAgentUrlImport(false);
                                     } catch (err: any) {
                                         await dialog.alert('导入失败', { type: 'error', details: String(err?.message || err) });
@@ -312,6 +316,7 @@ export default function SkillsTab(props: Props) {
                                                     const response = await fileApi.importSkill(agentId, skill.id);
                                                     toast.success(`已导入 "${skill.name}"（${response.files_written} 个文件）`);
                                                     queryClient.invalidateQueries({ queryKey: ['files', agentId, 'skills'] });
+                                                refreshSkillBrowser();
                                                     setShowImportSkillModal(false);
                                                 } catch (err: any) {
                                                     await dialog.alert('导入失败', { type: 'error', details: String(err?.message || err) });
@@ -429,6 +434,7 @@ export default function SkillsTab(props: Props) {
                                                 toast.success(`Extracted ${data.extracted} files successfully`);
                                                 setShowZipModal(false);
                                                 queryClient.invalidateQueries({ queryKey: ['files', agentId, 'skills'] });
+                                                refreshSkillBrowser();
                                             } catch (err: any) {
                                                 await dialog.alert('Failed to extract zip', { type: 'error', details: String(err?.message || err) });
                                             } finally {

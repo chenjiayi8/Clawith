@@ -377,7 +377,7 @@ async def list_approvals(
         tenant_agent_ids = select(Agent.id).where(Agent.tenant_id == tid)
         query = query.where(ApprovalRequest.agent_id.in_(tenant_agent_ids))
     # Non-admins further restricted to their own agents
-    if current_user.role != "platform_admin":
+    if getattr(current_user, "role", None) != "platform_admin":
         query = query.where(ApprovalRequest.agent_id.in_(
             select(Agent.id).where(Agent.creator_id == current_user.id)
         ))
@@ -507,15 +507,30 @@ class TenantQuotaUpdate(BaseModel):
     utility_model_id: str | None = None
 
 
+
+
+def _resolve_tenant_quota_target(
+    current_user: User,
+    tenant_id: str | None,
+) -> uuid.UUID:
+    if tenant_id:
+        if getattr(current_user, "role", None) != "platform_admin":
+            if not current_user.tenant_id or str(current_user.tenant_id) != tenant_id:
+                raise HTTPException(status_code=403, detail="Not allowed")
+        return uuid.UUID(tenant_id)
+    if not current_user.tenant_id:
+        raise HTTPException(status_code=400, detail="No tenant assigned")
+    return current_user.tenant_id
+
 @router.get("/tenant-quotas")
 async def get_tenant_quotas(
+    tenant_id: str | None = None,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
     """Get tenant quota defaults and heartbeat settings."""
-    if not current_user.tenant_id:
-        return {}
-    result = await db.execute(select(Tenant).where(Tenant.id == current_user.tenant_id))
+    target_tenant_id = _resolve_tenant_quota_target(current_user, tenant_id)
+    result = await db.execute(select(Tenant).where(Tenant.id == target_tenant_id))
     tenant = result.scalar_one_or_none()
     if not tenant:
         return {}
@@ -536,14 +551,14 @@ async def get_tenant_quotas(
 @router.patch("/tenant-quotas")
 async def update_tenant_quotas(
     data: TenantQuotaUpdate,
+    tenant_id: str | None = None,
     current_user: User = Depends(get_current_admin),
     db: AsyncSession = Depends(get_db),
 ):
     """Update tenant quota defaults (admin only). Enforces heartbeat floor on existing agents."""
-    if not current_user.tenant_id:
-        raise HTTPException(status_code=400, detail="No tenant assigned")
+    target_tenant_id = _resolve_tenant_quota_target(current_user, tenant_id)
 
-    result = await db.execute(select(Tenant).where(Tenant.id == current_user.tenant_id))
+    result = await db.execute(select(Tenant).where(Tenant.id == target_tenant_id))
     tenant = result.scalar_one_or_none()
     if not tenant:
         raise HTTPException(status_code=404, detail="Tenant not found")
@@ -586,7 +601,7 @@ async def update_tenant_quotas(
             model = model_result.scalar_one_or_none()
             if not model:
                 raise HTTPException(status_code=404, detail="Model not found")
-            if not model.tenant_id or model.tenant_id != current_user.tenant_id:
+            if not model.tenant_id or model.tenant_id != target_tenant_id:
                 raise HTTPException(status_code=400, detail="Model is not tenant-scoped to this tenant")
             if not model.enabled:
                 raise HTTPException(status_code=400, detail="Model is disabled")

@@ -95,7 +95,7 @@ export default function LlmTab({ selectedTenantId }: LlmTabProps) {
 
 
     useEffect(() => {
-        fetchJson<any>('/enterprise/tenant-quotas')
+        fetchJson<any>(`/enterprise/tenant-quotas${selectedTenantId ? `?tenant_id=${selectedTenantId}` : ''}`)
             .then((d) => setUtilityModelId(d?.utility_model_id || ''))
             .catch(() => {});
     }, [selectedTenantId]);
@@ -254,7 +254,7 @@ export default function LlmTab({ selectedTenantId }: LlmTabProps) {
                             const val = e.target.value;
                             setUtilityModelId(val);
                             try {
-                                await fetchJson('/enterprise/tenant-quotas', {
+                                await fetchJson(`/enterprise/tenant-quotas${selectedTenantId ? `?tenant_id=${selectedTenantId}` : ''}`, {
                                     method: 'PATCH',
                                     body: JSON.stringify({ utility_model_id: val || '' }),
                                 });
