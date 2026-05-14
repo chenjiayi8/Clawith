@@ -3067,13 +3067,13 @@ async def execute_tool(
         elif tool_name == "request_container_deploy":
             result = await workspace_tools.tool_request_container_deploy(agent_id, ws, arguments)
         elif tool_name == "list_workspace_projects":
-            result = await workspace_tools.tool_list_workspace_projects()
+            result = await workspace_tools.tool_list_workspace_projects(agent_id)
         elif tool_name == "undeploy_project":
-            result = await workspace_tools.tool_undeploy_project(arguments)
+            result = await workspace_tools.tool_undeploy_project(arguments, agent_id)
         elif tool_name == "get_bug_reports":
-            result = await workspace_tools.tool_get_bug_reports(arguments)
+            result = await workspace_tools.tool_get_bug_reports(arguments, agent_id)
         elif tool_name == "resolve_bug":
-            result = await workspace_tools.tool_resolve_bug(arguments)
+            result = await workspace_tools.tool_resolve_bug(arguments, agent_id)
         elif tool_name == "report_workspace_bug":
             result = await workspace_tools.tool_report_workspace_bug(agent_id, arguments)
         # ── AgentBay Tools ──
