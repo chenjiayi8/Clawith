@@ -609,10 +609,6 @@ async def update_tenant_quotas(
         tenant.min_poll_interval_floor = data.min_poll_interval_floor
     if data.max_webhook_rate_ceiling is not None:
         tenant.max_webhook_rate_ceiling = data.max_webhook_rate_ceiling
-    if data.utility_model_id is not None:
-        tenant.utility_model_id = (
-            None if data.utility_model_id == "" else uuid.UUID(data.utility_model_id)
-        )
 
     if data.utility_model_id is not None:
         if data.utility_model_id == "":
