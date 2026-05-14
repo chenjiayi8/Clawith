@@ -1,6 +1,8 @@
 """Clawith Backend — FastAPI Application Entry Point."""
 
 from contextlib import asynccontextmanager
+import json
+import os
 from pathlib import Path
 import shutil
 
@@ -48,28 +50,15 @@ def _log_bwrap_startup_status() -> None:
 async def _start_ss_local() -> None:
     """Start ss-local SOCKS5 proxy for Discord API calls. Tries nodes in priority order."""
     import asyncio
-    import json
-    import os
     import shutil
     import tempfile
     if not shutil.which("ss-local"):
         logger.info("[Proxy] ss-local not found — Discord proxy disabled")
         return
     # Load proxy nodes from config file (gitignored, mounted as Docker volume)
-    import json as _json
     cfg_file = os.environ.get("SS_CONFIG_FILE", "/data/ss-nodes.json")
-    if os.path.exists(cfg_file):
-        # Guard against empty or malformed config file — both produce a clear
-        # warning and a clean exit rather than an unhandled JSONDecodeError.
-        try:
-            raw = open(cfg_file).read().strip()
-            if not raw:
-                logger.warning(f"[Proxy] {cfg_file} exists but is empty — skipping proxy")
-                return
-            nodes = _json.loads(raw)
-        except (json.JSONDecodeError, ValueError) as exc:
-            logger.warning(f"[Proxy] Failed to parse {cfg_file}: {exc} — skipping proxy")
-            return
+    nodes = _load_ss_nodes_from_config(cfg_file)
+    if nodes is not None:
         logger.info(f"[Proxy] Loaded {len(nodes)} node(s) from {cfg_file}")
     elif os.environ.get("SS_SERVER") and os.environ.get("SS_PASSWORD"):
         nodes = [{"server": os.environ["SS_SERVER"], "port": int(os.environ.get("SS_PORT", "1080")),
@@ -97,6 +86,33 @@ async def _start_ss_local() -> None:
         except Exception as e:
             logger.error(f"[Proxy] {node['label']} error: {e}")
     logger.warning("[Proxy] All SS nodes failed — Discord API calls will run without proxy")
+
+
+def _load_ss_nodes_from_config(cfg_file: str) -> list[dict] | None:
+    """Load SS proxy nodes from JSON config, or return None when unavailable."""
+    cfg_path = Path(cfg_file)
+    if not cfg_path.exists():
+        return None
+    if cfg_path.is_dir():
+        logger.warning(f"[Proxy] {cfg_file} is a directory, expected a JSON file — skipping proxy")
+        return None
+    if not cfg_path.is_file():
+        logger.warning(f"[Proxy] {cfg_file} is not a regular file — skipping proxy")
+        return None
+
+    # Guard against empty or malformed config file — both produce a clear
+    # warning and a clean exit rather than an unhandled JSONDecodeError.
+    try:
+        raw = cfg_path.read_text().strip()
+        if not raw:
+            logger.warning(f"[Proxy] {cfg_file} exists but is empty — skipping proxy")
+            return None
+        nodes = json.loads(raw)
+    except (json.JSONDecodeError, OSError, ValueError) as exc:
+        logger.warning(f"[Proxy] Failed to parse {cfg_file}: {exc} — skipping proxy")
+        return None
+
+    return nodes
 
 
 @asynccontextmanager
