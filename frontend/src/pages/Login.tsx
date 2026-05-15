@@ -4,6 +4,7 @@ import { useTranslation } from 'react-i18next';
 import { useAuthStore } from '../stores';
 import { authApi, tenantApi, fetchJson } from '../services/api';
 import type { TokenResponse } from '../types';
+import { syncAuthAfterInvitationJoin } from '../utils/invitationJoinAuth';
 import {
     IconAlertTriangle,
     IconArrowRight,
@@ -282,14 +283,14 @@ export default function Login() {
                 //   and returns a new access_token scoped to that tenant.
                 if (invitationCode) {
                     try {
-                        const joinRes = await tenantApi.join(invitationCode);
-                        if (joinRes?.access_token) {
-                            // Store the new tenant-scoped token first so that
-                            // the subsequent /auth/me call uses the correct context.
-                            localStorage.setItem('token', joinRes.access_token);
-                            const meRes = await authApi.me();
-                            setAuth(meRes, joinRes.access_token);
-                        }
+                        await syncAuthAfterInvitationJoin({
+                            invitationCode,
+                            currentToken: tokenRes.access_token,
+                            joinCompany: tenantApi.join,
+                            loadCurrentUser: authApi.me,
+                            persistToken: (token) => localStorage.setItem('token', token),
+                            applyAuth: setAuth,
+                        });
                         navigate('/onboarding?mode=join');
                         return;
                     } catch (joinErr: any) {
