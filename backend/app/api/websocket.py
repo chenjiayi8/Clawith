@@ -193,6 +193,41 @@ def _rebuild_conversation_from_messages(
                 websocket._hidden_indices.add(len(conversation) - 1)
 
 
+async def _finalize_onboarding_progress_if_needed(
+    *,
+    needs_onboarding_mark: bool,
+    onboarding_mark_done: bool,
+    agent_id: uuid.UUID,
+    user_id: uuid.UUID,
+    onboarding_target_phase: str,
+    websocket: WebSocket,
+) -> bool:
+    """Persist onboarding progress when a turn finishes without streaming chunks.
+
+    Greeting turns can complete via a direct `finish` tool call, which returns a
+    final response without ever invoking the chunk or tool-status callbacks that
+    normally persist onboarding progress. In that case we still need to advance
+    the onboarding phase so subsequent turns receive the full tool list.
+    """
+    if not needs_onboarding_mark or onboarding_mark_done:
+        return onboarding_mark_done
+
+    from app.services.onboarding import mark_onboarding_phase
+
+    async with async_session() as _ob_db:
+        await mark_onboarding_phase(
+            _ob_db,
+            agent_id,
+            user_id,
+            onboarding_target_phase,
+        )
+    await websocket.send_json({
+        "type": "onboarded",
+        "agent_id": str(agent_id),
+    })
+    return True
+
+
 class ConnectionManager:
     """Manage WebSocket connections per agent."""
 
@@ -1204,9 +1239,20 @@ async def websocket_chat(
                     ):
                         raise RuntimeError(assistant_response)
 
-                    # Update last_active_at. The onboarding lock is handled
-                    # earlier in stream_to_ws on the first streamed chunk, so
-                    # there's nothing to reconcile here anymore.
+                    # Update onboarding progress for finish-only turns that never emitted
+                    # a streamed chunk or tool-status callback (for example an
+                    # onboarding greeting that immediately returns via `finish`).
+                    if not aborted:
+                        onboarding_mark_done = await _finalize_onboarding_progress_if_needed(
+                            needs_onboarding_mark=needs_onboarding_mark,
+                            onboarding_mark_done=onboarding_mark_done,
+                            agent_id=agent_id,
+                            user_id=user_id,
+                            onboarding_target_phase=onboarding_target_phase,
+                            websocket=websocket,
+                        )
+
+                    # Update last_active_at after onboarding reconciliation.
                     from datetime import datetime, timezone as tz
                     async with async_session() as _db:
                         from app.models.agent import Agent as AgentModel
