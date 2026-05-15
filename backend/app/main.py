@@ -57,8 +57,11 @@ async def _start_ss_local() -> None:
         return
     # Load proxy nodes from config file (gitignored, mounted as Docker volume)
     cfg_file = os.environ.get("SS_CONFIG_FILE", "/data/ss-nodes.json")
-    nodes = _load_ss_nodes_from_config(cfg_file)
-    if nodes is not None:
+    cfg_path = Path(cfg_file)
+    if cfg_path.exists():
+        nodes = _load_ss_nodes_from_config(cfg_file)
+        if nodes is None:
+            return
         logger.info(f"[Proxy] Loaded {len(nodes)} node(s) from {cfg_file}")
     elif os.environ.get("SS_SERVER") and os.environ.get("SS_PASSWORD"):
         nodes = [{"server": os.environ["SS_SERVER"], "port": int(os.environ.get("SS_PORT", "1080")),
