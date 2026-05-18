@@ -1,8 +1,11 @@
+import io
+import zipfile
 import uuid
 from types import SimpleNamespace
 
 import httpx
 import pytest
+from fastapi import HTTPException
 
 from app.api import skills as skills_api
 from app.core.security import get_current_user
@@ -206,3 +209,93 @@ async def test_browse_write_creates_tenant_skill_without_iterating_lazy_files(
     assert created_file.path == "SKILL.md"
     assert created_file.content == "# test"
     assert session.committed is True
+
+
+class FakeSkillFile:
+    def __init__(self, path: str, content: str):
+        self.path = path
+        self.content = content
+
+
+def _zip_bytes(files: dict[str, bytes]) -> bytes:
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+        for path, content in files.items():
+            archive.writestr(path, content)
+    return buffer.getvalue()
+
+
+@pytest.mark.asyncio
+async def test_preview_folder_upload_reports_existing_registry_diff(monkeypatch, platform_admin_user):
+    existing_skill = SimpleNamespace(
+        id=uuid.uuid4(),
+        folder_name="demo-skill",
+        name="Demo",
+        description="old",
+        icon="📋",
+        category="general",
+        tenant_id=platform_admin_user.tenant_id,
+        files=[FakeSkillFile("SKILL.md", "# Old\n"), FakeSkillFile("stale.txt", "remove\n")],
+    )
+    session = FakeSession(skill=existing_skill)
+    monkeypatch.setattr(skills_api, "async_session", FakeAsyncSessionFactory(session))
+
+    archive = _zip_bytes({"demo-skill/SKILL.md": b"# New\n", "demo-skill/scripts/run.py": b"print(\'ok\')\n"})
+    result = await skills_api.preview_folder_upload_from_archive(
+        archive,
+        target_folder="demo-skill",
+        current_user=platform_admin_user,
+    )
+
+    assert result["mode"] == "update"
+    assert result["deleted_paths"] == ["stale.txt"]
+
+
+@pytest.mark.asyncio
+async def test_apply_folder_upload_replaces_registry_files(monkeypatch, platform_admin_user):
+    existing_skill = SimpleNamespace(
+        id=uuid.uuid4(),
+        folder_name="demo-skill",
+        name="Demo",
+        description="old",
+        icon="📋",
+        category="general",
+        tenant_id=platform_admin_user.tenant_id,
+        files=[FakeSkillFile("SKILL.md", "# Old\n"), FakeSkillFile("stale.txt", "remove\n")],
+    )
+    session = FakeSession(skill=existing_skill)
+    monkeypatch.setattr(skills_api, "async_session", FakeAsyncSessionFactory(session))
+
+    archive = _zip_bytes({"demo-skill/SKILL.md": b"# New\n", "demo-skill/scripts/run.py": b"print(\'ok\')\n"})
+    preview = await skills_api.preview_folder_upload_from_archive(
+        archive,
+        target_folder="demo-skill",
+        current_user=platform_admin_user,
+    )
+
+    result = await skills_api.apply_folder_upload_from_archive(
+        archive,
+        target_folder="demo-skill",
+        expected_digest=preview["digest"],
+        replace_confirmed=True,
+        current_user=platform_admin_user,
+    )
+
+    assert result["mode"] == "update"
+
+
+@pytest.mark.asyncio
+async def test_preview_folder_upload_rejects_missing_root_skill_md(monkeypatch, platform_admin_user):
+    session = FakeSession(skill=None)
+    monkeypatch.setattr(skills_api, "async_session", FakeAsyncSessionFactory(session))
+
+    archive = _zip_bytes({"demo-skill/readme.md": b"missing\n"})
+
+    with pytest.raises(HTTPException) as exc:
+        await skills_api.preview_folder_upload_from_archive(
+            archive,
+            target_folder="demo-skill",
+            current_user=platform_admin_user,
+        )
+
+    assert exc.value.status_code == 400

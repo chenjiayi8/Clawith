@@ -2,6 +2,7 @@
 
 import asyncio
 import base64
+import hashlib
 import io
 import os
 import re
@@ -9,7 +10,7 @@ import zipfile
 from pathlib import Path
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, File as FastFile, Form, HTTPException, UploadFile as UploadFileType
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
@@ -18,6 +19,7 @@ from app.database import async_session
 from app.models.skill import Skill, SkillFile
 from app.core.security import get_current_admin, get_current_user, require_role
 from app.models.user import User
+from app.services.skill_archive_import import diff_skill_manifests, inspect_skill_archive
 
 router = APIRouter(prefix="/skills", tags=["skills"])
 
@@ -323,6 +325,121 @@ def _apply_skill_scope(query, current_user: User):
     if current_user.role == "platform_admin" or not current_user.tenant_id:
         return query
     return query.where(_or(Skill.tenant_id.is_(None), Skill.tenant_id == current_user.tenant_id))
+
+
+def _registry_manifest(skill: Skill | None) -> dict[str, str]:
+    if not skill:
+        return {}
+    return {file.path: file.content for file in skill.files}
+
+
+def _registry_target_state_digest(skill: Skill | None) -> str:
+    manifest = _registry_manifest(skill)
+    digest = hashlib.sha256()
+    digest.update(b"exists\0")
+    digest.update(b"1" if skill else b"0")
+    digest.update(b"\0")
+    for path in sorted(manifest):
+        digest.update(path.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(manifest[path].encode("utf-8"))
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+async def _load_skill_by_folder(db, *, target_folder: str, current_user: User) -> Skill | None:
+    query = select(Skill).where(Skill.folder_name == target_folder).options(selectinload(Skill.files))
+    result = await db.execute(_apply_skill_scope(query, current_user))
+    return result.scalar_one_or_none()
+
+
+async def preview_folder_upload_from_archive(data: bytes, *, target_folder: str, current_user: User) -> dict:
+    archive = inspect_skill_archive(data, target_folder=target_folder)
+
+    async with async_session() as db:
+        skill = await _load_skill_by_folder(db, target_folder=target_folder, current_user=current_user)
+
+    existing_manifest = _registry_manifest(skill)
+    diff = diff_skill_manifests(archive["files"], existing_manifest)
+    mode = "update" if skill else "create"
+
+    return {
+        "target_folder": target_folder,
+        "mode": mode,
+        "digest": archive["digest"],
+        "target_state_digest": _registry_target_state_digest(skill),
+        "total_files": archive["total_files"],
+        "added_count": len(diff["added"]),
+        "changed_count": len(diff["changed"]),
+        "deleted_count": len(diff["deleted"]),
+        "added_paths": diff["added"],
+        "changed_paths": diff["changed"],
+        "deleted_paths": diff["deleted"],
+    }
+
+
+async def apply_folder_upload_from_archive(
+    data: bytes,
+    *,
+    target_folder: str,
+    expected_digest: str,
+    replace_confirmed: bool,
+    current_user: User,
+    expected_target_state_digest: str | None = None,
+) -> dict:
+    archive = inspect_skill_archive(data, target_folder=target_folder)
+    if archive["digest"] != expected_digest:
+        raise HTTPException(status_code=409, detail="Uploaded archive no longer matches preview")
+
+    async with async_session() as db:
+        skill = await _load_skill_by_folder(db, target_folder=target_folder, current_user=current_user)
+        current_target_state_digest = _registry_target_state_digest(skill)
+        if expected_target_state_digest and current_target_state_digest != expected_target_state_digest:
+            raise HTTPException(status_code=409, detail="Target folder changed since preview")
+
+        existing_manifest = _registry_manifest(skill)
+        mode = "update" if skill else "create"
+
+        if skill:
+            _ensure_skill_write_access(skill, current_user)
+            if not replace_confirmed:
+                raise HTTPException(status_code=409, detail="Target folder already exists and requires confirmation")
+        else:
+            skill = Skill(
+                name=target_folder.replace("-", " ").title(),
+                description="",
+                category="general",
+                icon="📋",
+                folder_name=target_folder,
+                is_builtin=False,
+                tenant_id=current_user.tenant_id,
+            )
+            db.add(skill)
+            await db.flush()
+
+        skill_md = archive["files"]["SKILL.md"]
+        frontmatter = _parse_skill_md_frontmatter(skill_md)
+        skill.name = frontmatter.get("name", skill.name)
+        skill.description = frontmatter.get("description", skill.description)
+
+        existing_files = list(skill.files) if getattr(skill, "files", None) is not None else []
+        for existing_file in existing_files:
+            await db.delete(existing_file)
+        await db.flush()
+
+        for path, content in archive["files"].items():
+            db.add(SkillFile(skill_id=skill.id, path=path, content=content.replace("\x00", "")))
+
+        diff = diff_skill_manifests(archive["files"], existing_manifest)
+        await db.commit()
+
+    return {
+        "status": "ok",
+        "mode": mode,
+        "target_folder": target_folder,
+        "files_written": len(archive["files"]),
+        "deleted_count": len(diff["deleted"]),
+    }
 
 
 def _ensure_skill_write_access(skill: Skill, current_user: User):
@@ -653,6 +770,38 @@ async def preview_url_import(body: UrlImportIn, current_user: User = Depends(get
         "total_size": sum(len(f["content"]) for f in files),
         "has_scripts": any("/" in f["path"] for f in files if f["path"] != "SKILL.md"),
     }
+
+
+@router.post("/upload-folder/preview")
+async def preview_folder_upload(
+    file: UploadFileType = FastFile(...),
+    target_folder: str = Form(...),
+    current_user: User = Depends(get_current_admin),
+):
+    return await preview_folder_upload_from_archive(
+        await file.read(),
+        target_folder=target_folder,
+        current_user=current_user,
+    )
+
+
+@router.post("/upload-folder/apply")
+async def apply_folder_upload(
+    file: UploadFileType = FastFile(...),
+    target_folder: str = Form(...),
+    expected_digest: str = Form(...),
+    replace_confirmed: bool = Form(False),
+    expected_target_state_digest: str = Form(""),
+    current_user: User = Depends(get_current_admin),
+):
+    return await apply_folder_upload_from_archive(
+        await file.read(),
+        target_folder=target_folder,
+        expected_digest=expected_digest,
+        replace_confirmed=replace_confirmed,
+        expected_target_state_digest=expected_target_state_digest or None,
+        current_user=current_user,
+    )
 
 
 # ─── Standard CRUD ────────────────────────────────────
