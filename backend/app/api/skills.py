@@ -13,6 +13,7 @@ import httpx
 from fastapi import APIRouter, Depends, File as FastFile, Form, HTTPException, UploadFile as UploadFileType
 from pydantic import BaseModel
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import selectinload
 
 from app.database import async_session
@@ -359,12 +360,60 @@ def _validate_skill_folder_name(target_folder: str) -> None:
         raise HTTPException(status_code=400, detail="Invalid target folder name")
 
 
+def _registry_archive_size(files: dict[str, str]) -> int:
+    return sum(len(content.encode("utf-8")) for content in files.values())
+
+
+def _enforce_registry_skill_size(files: dict[str, str]) -> None:
+    total_size = _registry_archive_size(files)
+    if total_size > MAX_SKILL_SIZE:
+        raise HTTPException(413, f"Skill exceeds size limit ({MAX_SKILL_SIZE // 1024}KB)")
+
+
+async def _get_global_skill_by_folder(db, *, target_folder: str) -> Skill | None:
+    query = select(Skill).where(Skill.folder_name == target_folder).options(selectinload(Skill.files))
+    result = await db.execute(query)
+    return result.scalar_one_or_none()
+
+
+async def _get_global_skill_by_name(db, *, name: str) -> Skill | None:
+    query = select(Skill).where(Skill.name == name).options(selectinload(Skill.files))
+    result = await db.execute(query)
+    return result.scalar_one_or_none()
+
+
+async def _ensure_registry_upload_conflicts(
+    db,
+    *,
+    target_folder: str,
+    resolved_name: str,
+    visible_skill: Skill | None,
+) -> None:
+    global_folder_skill = await _get_global_skill_by_folder(db, target_folder=target_folder)
+    if global_folder_skill and (visible_skill is None or global_folder_skill.id != visible_skill.id):
+        raise HTTPException(status_code=409, detail="A skill with this folder already exists")
+
+    global_name_skill = await _get_global_skill_by_name(db, name=resolved_name)
+    if global_name_skill and (visible_skill is None or global_name_skill.id != visible_skill.id):
+        raise HTTPException(status_code=409, detail="A skill with this name already exists")
+
+
 async def preview_folder_upload_from_archive(data: bytes, *, target_folder: str, current_user: User) -> dict:
     _validate_skill_folder_name(target_folder)
     archive = inspect_skill_archive(data, target_folder=target_folder)
+    _enforce_registry_skill_size(archive["files"])
 
     async with async_session() as db:
         skill = await _load_skill_by_folder(db, target_folder=target_folder, current_user=current_user)
+        skill_md = archive["files"]["SKILL.md"]
+        frontmatter = _parse_skill_md_frontmatter(skill_md)
+        resolved_name = frontmatter.get("name", skill.name if skill else target_folder.replace("-", " ").title())
+        await _ensure_registry_upload_conflicts(
+            db,
+            target_folder=target_folder,
+            resolved_name=resolved_name,
+            visible_skill=skill,
+        )
 
     existing_manifest = _registry_manifest(skill)
     diff = diff_skill_manifests(archive["files"], existing_manifest)
@@ -396,6 +445,7 @@ async def apply_folder_upload_from_archive(
 ) -> dict:
     _validate_skill_folder_name(target_folder)
     archive = inspect_skill_archive(data, target_folder=target_folder)
+    _enforce_registry_skill_size(archive["files"])
     if archive["digest"] != expected_digest:
         raise HTTPException(status_code=409, detail="Uploaded archive no longer matches preview")
 
@@ -407,6 +457,15 @@ async def apply_folder_upload_from_archive(
 
         existing_manifest = _registry_manifest(skill)
         mode = "update" if skill else "create"
+        skill_md = archive["files"]["SKILL.md"]
+        frontmatter = _parse_skill_md_frontmatter(skill_md)
+        resolved_name = frontmatter.get("name", skill.name if skill else target_folder.replace("-", " ").title())
+        await _ensure_registry_upload_conflicts(
+            db,
+            target_folder=target_folder,
+            resolved_name=resolved_name,
+            visible_skill=skill,
+        )
 
         if skill:
             _ensure_skill_write_access(skill, current_user)
@@ -425,8 +484,6 @@ async def apply_folder_upload_from_archive(
             db.add(skill)
             await db.flush()
 
-        skill_md = archive["files"]["SKILL.md"]
-        frontmatter = _parse_skill_md_frontmatter(skill_md)
         skill.name = frontmatter.get("name", skill.name)
         skill.description = frontmatter.get("description", skill.description)
         skill.icon = frontmatter.get("icon", skill.icon)
@@ -441,7 +498,12 @@ async def apply_folder_upload_from_archive(
             db.add(SkillFile(skill_id=skill.id, path=path, content=content.replace("\x00", "")))
 
         diff = diff_skill_manifests(archive["files"], existing_manifest)
-        await db.commit()
+        try:
+            await db.commit()
+        except IntegrityError as exc:
+            if hasattr(db, "rollback"):
+                await db.rollback()
+            raise HTTPException(status_code=409, detail="Skill name or folder already exists") from exc
 
     return {
         "status": "ok",
