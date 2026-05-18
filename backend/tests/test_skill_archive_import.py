@@ -84,3 +84,13 @@ def test_inspect_skill_archive_rejects_windows_absolute_drive_paths():
 
     with pytest.raises(HTTPException):
         inspect_skill_archive(data, target_folder="demo")
+
+
+def test_inspect_skill_archive_rejects_non_utf8_files():
+    data = _zip_bytes({"SKILL.md": b"# Demo\n", "assets/icon.bin": b"\xff\xfe\xfd"})
+
+    with pytest.raises(HTTPException) as exc:
+        inspect_skill_archive(data, target_folder="demo")
+
+    assert exc.value.status_code == 400
+    assert "UTF-8" in str(exc.value.detail)

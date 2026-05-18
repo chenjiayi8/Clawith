@@ -8,7 +8,7 @@ import pytest
 from fastapi import HTTPException
 
 from app.api import skills as skills_api
-from app.core.security import get_current_user
+from app.core.security import get_current_admin, get_current_user
 from app.main import app
 
 
@@ -266,7 +266,18 @@ async def test_apply_folder_upload_replaces_registry_files(monkeypatch, platform
     session = FakeSession(skill=existing_skill)
     monkeypatch.setattr(skills_api, "async_session", FakeAsyncSessionFactory(session))
 
-    archive = _zip_bytes({"demo-skill/SKILL.md": b"# New\n", "demo-skill/scripts/run.py": b"print(\'ok\')\n"})
+    archive = _zip_bytes(
+        {
+            "demo-skill/SKILL.md": (
+                b"---\nname: Uploaded Demo\n"
+                b"description: updated description\n"
+                b"icon: \xf0\x9f\x9a\x80\n"
+                b"category: automation\n"
+                b"---\n\n# New\n"
+            ),
+            "demo-skill/scripts/run.py": b"print(\'ok\')\n",
+        }
+    )
     preview = await skills_api.preview_folder_upload_from_archive(
         archive,
         target_folder="demo-skill",
@@ -277,6 +288,7 @@ async def test_apply_folder_upload_replaces_registry_files(monkeypatch, platform
         archive,
         target_folder="demo-skill",
         expected_digest=preview["digest"],
+        expected_target_state_digest=preview["target_state_digest"],
         replace_confirmed=True,
         current_user=platform_admin_user,
     )
@@ -284,10 +296,21 @@ async def test_apply_folder_upload_replaces_registry_files(monkeypatch, platform
     assert result["mode"] == "update"
     assert result["files_written"] == 2
     assert result["deleted_count"] == 1
+    assert existing_skill.name == "Uploaded Demo"
+    assert existing_skill.description == "updated description"
+    assert existing_skill.icon == "🚀"
+    assert existing_skill.category == "automation"
     assert session.deleted == existing_skill.files
     written_files = [value for value in session.added if isinstance(value, skills_api.SkillFile)]
     assert [(value.path, value.content) for value in written_files] == [
-        ("SKILL.md", "# New\n"),
+        (
+            "SKILL.md",
+            "---\nname: Uploaded Demo\n"
+            "description: updated description\n"
+            "icon: 🚀\n"
+            "category: automation\n"
+            "---\n\n# New\n",
+        ),
         ("scripts/run.py", "print(\'ok\')\n"),
     ]
     assert all(value.path != "stale.txt" for value in written_files)
@@ -309,3 +332,26 @@ async def test_preview_folder_upload_rejects_missing_root_skill_md(monkeypatch, 
         )
 
     assert exc.value.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_upload_folder_apply_requires_target_state_digest_field(client, monkeypatch, platform_admin_user):
+    async def _should_not_run(**_kwargs):
+        raise AssertionError("handler should not run when required form field is missing")
+
+    monkeypatch.setattr(skills_api, "apply_folder_upload_from_archive", _should_not_run)
+    app.dependency_overrides[get_current_admin] = lambda: platform_admin_user
+
+    files = {"file": ("demo-skill.zip", _zip_bytes({"demo-skill/SKILL.md": b"# Demo\n"}), "application/zip")}
+    data = {
+        "target_folder": "demo-skill",
+        "expected_digest": "digest",
+        "replace_confirmed": "true",
+    }
+
+    async with await client() as ac:
+        response = await ac.post("/api/skills/upload-folder/apply", data=data, files=files)
+
+    app.dependency_overrides.clear()
+
+    assert response.status_code == 422

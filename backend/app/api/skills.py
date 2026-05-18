@@ -383,9 +383,9 @@ async def apply_folder_upload_from_archive(
     *,
     target_folder: str,
     expected_digest: str,
+    expected_target_state_digest: str,
     replace_confirmed: bool,
     current_user: User,
-    expected_target_state_digest: str | None = None,
 ) -> dict:
     archive = inspect_skill_archive(data, target_folder=target_folder)
     if archive["digest"] != expected_digest:
@@ -394,7 +394,7 @@ async def apply_folder_upload_from_archive(
     async with async_session() as db:
         skill = await _load_skill_by_folder(db, target_folder=target_folder, current_user=current_user)
         current_target_state_digest = _registry_target_state_digest(skill)
-        if expected_target_state_digest and current_target_state_digest != expected_target_state_digest:
+        if current_target_state_digest != expected_target_state_digest:
             raise HTTPException(status_code=409, detail="Target folder changed since preview")
 
         existing_manifest = _registry_manifest(skill)
@@ -421,6 +421,8 @@ async def apply_folder_upload_from_archive(
         frontmatter = _parse_skill_md_frontmatter(skill_md)
         skill.name = frontmatter.get("name", skill.name)
         skill.description = frontmatter.get("description", skill.description)
+        skill.icon = frontmatter.get("icon", skill.icon)
+        skill.category = frontmatter.get("category", skill.category)
 
         existing_files = list(skill.files) if getattr(skill, "files", None) is not None else []
         for existing_file in existing_files:
@@ -791,7 +793,7 @@ async def apply_folder_upload(
     target_folder: str = Form(...),
     expected_digest: str = Form(...),
     replace_confirmed: bool = Form(False),
-    expected_target_state_digest: str = Form(""),
+    expected_target_state_digest: str = Form(...),
     current_user: User = Depends(get_current_admin),
 ):
     return await apply_folder_upload_from_archive(
@@ -799,7 +801,7 @@ async def apply_folder_upload(
         target_folder=target_folder,
         expected_digest=expected_digest,
         replace_confirmed=replace_confirmed,
-        expected_target_state_digest=expected_target_state_digest or None,
+        expected_target_state_digest=expected_target_state_digest,
         current_user=current_user,
     )
 

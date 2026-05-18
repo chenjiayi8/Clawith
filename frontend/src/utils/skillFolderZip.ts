@@ -156,11 +156,11 @@ export async function buildSkillFolderZip(files: SkillFolderFile[], rootFolder: 
     endOfCentralDirectory.setUint32(16, offset, true);
     endOfCentralDirectory.setUint16(20, 0, true);
 
-    parts.push(...centralDirectory, new Uint8Array(endOfCentralDirectory.buffer));
+    for (const chunk of centralDirectory) {
+        parts.push(chunk);
+    }
+    parts.push(new Uint8Array(endOfCentralDirectory.buffer));
 
-    // Quick manual smoke harness:
-    // 1. In the browser console, call buildSkillFolderZip([{ path: 'SKILL.md', file }], 'demo-skill').
-    // 2. Upload the returned File through the preview/apply folder endpoints and confirm the backend sees demo-skill/SKILL.md.
     return new File(parts as BlobPart[], `${normalizedRoot}.zip`, {
         type: 'application/zip',
         lastModified: Date.now(),
