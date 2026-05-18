@@ -26,13 +26,19 @@ class TrapList(list):
 
 
 class FakeSession:
-    def __init__(self, *, skill=None):
+    def __init__(self, *, skill=None, execute_results=None, commit_error=None):
         self.skill = skill
+        self.execute_results = list(execute_results) if execute_results is not None else None
+        self.commit_error = commit_error
         self.added = []
         self.deleted = []
         self.committed = False
 
     async def execute(self, _query):
+        if self.execute_results is not None:
+            if not self.execute_results:
+                raise AssertionError("unexpected extra execute() call")
+            return FakeScalarResult(self.execute_results.pop(0))
         return FakeScalarResult(self.skill)
 
     def add(self, value):
@@ -45,6 +51,8 @@ class FakeSession:
         self.deleted.append(value)
 
     async def commit(self):
+        if self.commit_error is not None:
+            raise self.commit_error
         self.committed = True
 
 
@@ -350,6 +358,80 @@ async def test_preview_folder_upload_rejects_invalid_target_folder(monkeypatch, 
 
     assert exc.value.status_code == 400
     assert "folder" in str(exc.value.detail).lower()
+
+
+@pytest.mark.asyncio
+async def test_preview_folder_upload_rejects_hidden_folder_conflict(monkeypatch, platform_admin_user):
+    hidden_skill = SimpleNamespace(
+        id=uuid.uuid4(),
+        folder_name="demo-skill",
+        name="Hidden Demo",
+        tenant_id=uuid.uuid4(),
+        files=[],
+    )
+    session = FakeSession(execute_results=[None, hidden_skill])
+    monkeypatch.setattr(skills_api, "async_session", FakeAsyncSessionFactory(session))
+
+    archive = _zip_bytes({"demo-skill/SKILL.md": b"# Demo\n"})
+
+    with pytest.raises(HTTPException) as exc:
+        await skills_api.preview_folder_upload_from_archive(
+            archive,
+            target_folder="demo-skill",
+            current_user=platform_admin_user,
+        )
+
+    assert exc.value.status_code == 409
+    assert "folder" in str(exc.value.detail).lower()
+
+
+@pytest.mark.asyncio
+async def test_preview_folder_upload_rejects_uploaded_name_conflict(monkeypatch, platform_admin_user):
+    conflicting_skill = SimpleNamespace(
+        id=uuid.uuid4(),
+        folder_name="other-skill",
+        name="Uploaded Demo",
+        tenant_id=platform_admin_user.tenant_id,
+        files=[],
+    )
+    session = FakeSession(execute_results=[None, None, conflicting_skill])
+    monkeypatch.setattr(skills_api, "async_session", FakeAsyncSessionFactory(session))
+
+    archive = _zip_bytes(
+        {
+            "demo-skill/SKILL.md": (
+                b"---\nname: Uploaded Demo\ndescription: conflict\n---\n\n# Demo\n"
+            ),
+        }
+    )
+
+    with pytest.raises(HTTPException) as exc:
+        await skills_api.preview_folder_upload_from_archive(
+            archive,
+            target_folder="demo-skill",
+            current_user=platform_admin_user,
+        )
+
+    assert exc.value.status_code == 409
+    assert "name" in str(exc.value.detail).lower()
+
+
+@pytest.mark.asyncio
+async def test_preview_folder_upload_rejects_registry_skill_over_size_limit(monkeypatch, platform_admin_user):
+    session = FakeSession(execute_results=[None, None, None])
+    monkeypatch.setattr(skills_api, "async_session", FakeAsyncSessionFactory(session))
+
+    oversized = "a" * (skills_api.MAX_SKILL_SIZE + 1)
+    archive = _zip_bytes({"demo-skill/SKILL.md": oversized.encode("utf-8")})
+
+    with pytest.raises(HTTPException) as exc:
+        await skills_api.preview_folder_upload_from_archive(
+            archive,
+            target_folder="demo-skill",
+            current_user=platform_admin_user,
+        )
+
+    assert exc.value.status_code == 413
 
 
 @pytest.mark.asyncio
