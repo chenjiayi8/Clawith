@@ -63,7 +63,14 @@ def inspect_skill_archive(data: bytes, *, target_folder: str) -> dict:
             rel_path = rel_path.strip("/")
             if not rel_path:
                 continue
-            files[rel_path] = zf.read(item).decode("utf-8", errors="replace")
+            raw_content = zf.read(item)
+            try:
+                files[rel_path] = raw_content.decode("utf-8")
+            except UnicodeDecodeError as exc:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Skill archive file '{rel_path}' must be UTF-8 text",
+                ) from exc
 
     if "SKILL.md" not in files:
         raise HTTPException(status_code=400, detail="Uploaded folder must contain a root SKILL.md")

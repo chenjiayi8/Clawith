@@ -843,7 +843,7 @@ def _apply_skill_dir_exact_sync(skill_dir: Path, uploaded_files: dict[str, str])
 
     for rel_path, content in uploaded_files.items():
         out_path = (skill_root / rel_path).resolve()
-        if not str(out_path).startswith(str(skill_root)):
+        if not out_path.is_relative_to(skill_root):
             raise HTTPException(status_code=400, detail="Invalid skill archive path")
         out_path.parent.mkdir(parents=True, exist_ok=True)
         out_path.write_text(content, encoding="utf-8")
