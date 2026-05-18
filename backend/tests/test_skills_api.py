@@ -282,6 +282,16 @@ async def test_apply_folder_upload_replaces_registry_files(monkeypatch, platform
     )
 
     assert result["mode"] == "update"
+    assert result["files_written"] == 2
+    assert result["deleted_count"] == 1
+    assert session.deleted == existing_skill.files
+    written_files = [value for value in session.added if isinstance(value, skills_api.SkillFile)]
+    assert [(value.path, value.content) for value in written_files] == [
+        ("SKILL.md", "# New\n"),
+        ("scripts/run.py", "print(\'ok\')\n"),
+    ]
+    assert all(value.path != "stale.txt" for value in written_files)
+    assert session.committed is True
 
 
 @pytest.mark.asyncio
