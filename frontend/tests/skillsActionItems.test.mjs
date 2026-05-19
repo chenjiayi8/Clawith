@@ -31,6 +31,14 @@ test('getEnterpriseSkillActionIds returns the locked enterprise action order', (
   ]);
 });
 
+test('enterprise actions keep settings, folder upload, URL import, then ClawHub in sequence', () => {
+  const actions = getEnterpriseSkillActionIds();
+
+  assert.ok(actions.indexOf('settings') < actions.indexOf('upload-folder'));
+  assert.ok(actions.indexOf('upload-folder') < actions.indexOf('import-url'));
+  assert.ok(actions.indexOf('import-url') < actions.indexOf('browse-clawhub'));
+});
+
 test('getAgentSkillActionIds returns the locked agent action order', () => {
   assert.deepEqual(getAgentSkillActionIds(), [
     'browse-clawhub',

@@ -4,6 +4,9 @@ import PromptModal from '../../../components/PromptModal';
 import FileBrowser from '../../../components/FileBrowser';
 import type { FileBrowserApi } from '../../../components/FileBrowser';
 import SkillFolderUploadModal from '../../../components/skills/SkillFolderUploadModal';
+import SkillsActionBar, { type SkillsActionBarAction } from '../../../components/skills/SkillsActionBar';
+import { createEnterpriseSkillUploadAdapter } from '../../../components/skills/skillUploadSurfaceAdapters';
+import { getEnterpriseSkillActionIds } from '../../../components/skills/skillsActionItems';
 import { skillApi } from '../../../services/api';
 
 // ─── Skills Tab ────────────────────────────────────
@@ -40,6 +43,12 @@ export default function SkillsTab() {
         read: (path: string) => skillApi.browse.read(path),
         write: (path: string, content: string) => skillApi.browse.write(path, content),
         delete: (path: string) => skillApi.browse.delete(path),
+    }), []);
+
+    const uploadAdapter = useMemo(() => createEnterpriseSkillUploadAdapter({
+        preview: (file, targetFolder) => skillApi.folderUpload.preview(file, targetFolder),
+        apply: (input) => skillApi.folderUpload.apply(input),
+        refresh: () => setRefreshKey(k => k + 1),
     }), []);
 
     const handleSearch = async () => {
@@ -100,6 +109,54 @@ export default function SkillsTab() {
         setUrlImporting(false);
     };
 
+    const handleSettingsClick = async () => {
+        setShowSettings(s => !s);
+        if (!tokenStatus) {
+            try {
+                const status = await skillApi.settings.getToken();
+                setTokenStatus(status);
+            } catch {
+                // ignore
+            }
+        }
+    };
+
+    const actionConfig: Record<string, SkillsActionBarAction> = {
+        settings: {
+            id: 'settings',
+            label: t('common.settings', 'Settings'),
+            title: t('common.settings', 'Settings'),
+            onClick: handleSettingsClick,
+        },
+        'upload-folder': {
+            id: 'upload-folder',
+            label: t('enterprise.tools.uploadFolderModal.openButton'),
+            onClick: () => setShowSkillFolderUploadModal(true),
+        },
+        'import-url': {
+            id: 'import-url',
+            label: t('enterprise.tools.importFromUrl'),
+            onClick: () => {
+                setShowUrlModal(true);
+                setUrlInput('');
+                setUrlPreview(null);
+            },
+        },
+        'browse-clawhub': {
+            id: 'browse-clawhub',
+            label: t('enterprise.tools.browseClawhub'),
+            variant: 'primary',
+            onClick: () => {
+                setShowClawhubModal(true);
+                setSearchQuery('');
+                setSearchResults([]);
+                setHasSearched(false);
+            },
+        },
+    };
+
+    const enterpriseActions = getEnterpriseSkillActionIds().map((id) => actionConfig[id]);
+
     const tierBadge = (tier: number) => {
         const styles: Record<number, { bg: string; color: string; label: string }> = {
             1: { bg: 'rgba(52,199,89,0.12)', color: 'var(--success, #34c759)', label: 'Tier 1 · Pure Prompt' },
@@ -116,56 +173,11 @@ export default function SkillsTab() {
 
     return (
         <div>
-            <div style={{ marginBottom: '12px', display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
-                <div>
-                    <h3>{t('enterprise.tabs.skills', 'Skill Registry')}</h3>
-                    <p style={{ fontSize: '13px', color: 'var(--text-tertiary)', marginTop: '4px' }}>
-                        {t('enterprise.tools.manageGlobalSkills')}
-                    </p>
-                </div>
-                <div style={{ display: 'flex', gap: '8px', flexShrink: 0 }}>
-                    <button
-                        className="btn btn-secondary"
-                        style={{ fontSize: '13px', padding: '6px 10px', minWidth: 'auto' }}
-                        onClick={async () => {
-                            setShowSettings(s => !s);
-                            if (!tokenStatus) {
-                                try {
-                                    const status = await skillApi.settings.getToken();
-                                    setTokenStatus(status);
-                                } catch { /* ignore */ }
-                            }
-                        }}
-                        title="Settings"
-                    >
-                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                            <circle cx="12" cy="12" r="3" />
-                            <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z" />
-                        </svg>
-                    </button>
-                    <button
-                        className="btn btn-secondary"
-                        style={{ fontSize: '13px' }}
-                        onClick={() => setShowSkillFolderUploadModal(true)}
-                    >
-                        {t('enterprise.tools.uploadFolderModal.openButton')}
-                    </button>
-                    <button
-                        className="btn btn-secondary"
-                        style={{ fontSize: '13px' }}
-                        onClick={() => { setShowUrlModal(true); setUrlInput(''); setUrlPreview(null); }}
-                    >
-                        {t('enterprise.tools.importFromUrl')}
-                    </button>
-                    <button
-                        className="btn btn-primary"
-                        style={{ fontSize: '13px' }}
-                        onClick={() => { setShowClawhubModal(true); setSearchQuery(''); setSearchResults([]); setHasSearched(false); }}
-                    >
-                        {t('enterprise.tools.browseClawhub')}
-                    </button>
-                </div>
-            </div>
+            <SkillsActionBar
+                title={t('enterprise.tabs.skills', 'Skill Registry')}
+                description={t('enterprise.tools.manageGlobalSkills')}
+                actions={enterpriseActions}
+            />
 
             {/* GitHub Token Settings Panel */}
             {showSettings && (
@@ -341,11 +353,9 @@ export default function SkillsTab() {
                 open={showSkillFolderUploadModal}
                 onClose={() => setShowSkillFolderUploadModal(false)}
                 i18nPrefix="enterprise.tools.uploadFolderModal"
-                previewRequest={(file, targetFolder) => skillApi.folderUpload.preview(file, targetFolder)}
-                applyRequest={(input) => skillApi.folderUpload.apply(input)}
-                onApplied={async () => {
-                    setRefreshKey(k => k + 1);
-                }}
+                previewRequest={uploadAdapter.previewRequest}
+                applyRequest={uploadAdapter.applyRequest}
+                onApplied={uploadAdapter.onApplied}
             />
 
             {/* Toast */}
