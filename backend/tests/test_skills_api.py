@@ -98,6 +98,7 @@ class QueryField:
 
 class FakeSkill:
     folder_name = QueryField()
+    name = QueryField()
     tenant_id = QueryField()
     files = RaiseOnInstanceAccess()
 
@@ -322,6 +323,54 @@ async def test_apply_folder_upload_replaces_registry_files(monkeypatch, platform
         ("scripts/run.py", "print(\'ok\')\n"),
     ]
     assert all(value.path != "stale.txt" for value in written_files)
+    assert session.committed is True
+
+
+@pytest.mark.asyncio
+async def test_apply_folder_upload_creates_registry_skill_without_iterating_lazy_files(
+    monkeypatch, platform_admin_user
+):
+    session = FakeSession(execute_results=[None, None, None, None, None, None])
+    monkeypatch.setattr(skills_api, "async_session", FakeAsyncSessionFactory(session))
+    monkeypatch.setattr(skills_api, "select", lambda *_args, **_kwargs: FakeQuery())
+    monkeypatch.setattr(skills_api, "selectinload", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(skills_api, "Skill", FakeSkill)
+
+    archive = _zip_bytes(
+        {
+            "note/SKILL.md": (
+                b"---\nname: Note\ndescription: save notes\nicon: \xf0\x9f\x93\x9d\ncategory: utility\n---\n\n# Note\n"
+            ),
+        }
+    )
+
+    preview = await skills_api.preview_folder_upload_from_archive(
+        archive,
+        target_folder="note",
+        current_user=platform_admin_user,
+    )
+
+    result = await skills_api.apply_folder_upload_from_archive(
+        archive,
+        target_folder="note",
+        expected_digest=preview["digest"],
+        expected_target_state_digest=preview["target_state_digest"],
+        replace_confirmed=True,
+        current_user=platform_admin_user,
+    )
+
+    assert result["mode"] == "create"
+    assert result["files_written"] == 1
+    created_skill = next(value for value in session.added if isinstance(value, FakeSkill))
+    created_file = next(value for value in session.added if isinstance(value, skills_api.SkillFile))
+    assert created_skill.folder_name == "note"
+    assert created_skill.name == "Note"
+    assert created_skill.description == "save notes"
+    assert created_skill.icon == "📝"
+    assert created_skill.category == "utility"
+    assert created_skill.tenant_id == platform_admin_user.tenant_id
+    assert created_file.path == "SKILL.md"
+    assert session.deleted == []
     assert session.committed is True
 
 

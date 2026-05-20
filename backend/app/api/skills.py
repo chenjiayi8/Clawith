@@ -489,10 +489,10 @@ async def apply_folder_upload_from_archive(
         skill.icon = frontmatter.get("icon", skill.icon)
         skill.category = frontmatter.get("category", skill.category)
 
-        existing_files = list(skill.files) if getattr(skill, "files", None) is not None else []
-        for existing_file in existing_files:
-            await db.delete(existing_file)
-        await db.flush()
+        if mode == "update":
+            for existing_file in skill.files:
+                await db.delete(existing_file)
+            await db.flush()
 
         for path, content in archive["files"].items():
             db.add(SkillFile(skill_id=skill.id, path=path, content=content.replace("\x00", "")))
