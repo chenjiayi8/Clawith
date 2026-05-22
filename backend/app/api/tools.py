@@ -158,7 +158,7 @@ async def list_tools(
     target_tenant_id = _resolve_target_tenant_id(current_user, tenant_id)
     if target_tenant_id:
         from sqlalchemy import or_ as _or
-        query = query.where(_or(Tool.tenant_id is None, Tool.tenant_id == target_tenant_id))
+        query = query.where(_or(Tool.tenant_id.is_(None), Tool.tenant_id == target_tenant_id))
     result = await db.execute(query)
     tools = result.scalars().all()
     response = []
