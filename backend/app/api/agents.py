@@ -893,9 +893,10 @@ async def delete_agent(
             settings_result = await db.execute(select(OKRSettings).where(OKRSettings.tenant_id == agent.tenant_id))
             okr_settings = settings_result.scalar_one_or_none()
 
-        is_okr_system_agent = agent.name == "OKR Agent" or bool(
-            okr_settings and okr_settings.okr_agent_id == agent.id
-        )
+        if okr_settings and okr_settings.okr_agent_id is not None:
+            is_okr_system_agent = okr_settings.okr_agent_id == agent.id
+        else:
+            is_okr_system_agent = agent.name == "OKR Agent"
         if not is_okr_system_agent:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
