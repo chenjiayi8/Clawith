@@ -313,6 +313,65 @@ async def test_platform_admin_can_delete_disabled_okr_system_agent(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_platform_admin_cannot_delete_stray_same_named_system_agent_when_settings_point_elsewhere(monkeypatch):
+    platform_admin = make_user(role="platform_admin")
+    canonical_agent_id = uuid.uuid4()
+    agent = make_agent(
+        platform_admin.id,
+        tenant_id=platform_admin.tenant_id,
+        name="OKR Agent",
+        is_system=True,
+    )
+    settings = OKRSettings(
+        tenant_id=platform_admin.tenant_id,
+        enabled=False,
+        okr_agent_id=canonical_agent_id,
+    )
+    db = OKRSettingsDB(settings)
+    patch_delete_dependencies(monkeypatch, agent, is_creator=False)
+
+    with pytest.raises(HTTPException) as exc_info:
+        await agents_api.delete_agent(
+            agent_id=agent.id,
+            current_user=platform_admin,
+            db=db,
+        )
+
+    assert exc_info.value.status_code == 403
+    assert exc_info.value.detail == (
+        "System agents cannot be deleted. Disable the related feature (e.g. OKR) in Company Settings instead."
+    )
+    assert db.deleted == []
+    assert settings.okr_agent_id == canonical_agent_id
+
+
+@pytest.mark.asyncio
+async def test_platform_admin_cannot_delete_okr_system_agent_when_settings_missing(monkeypatch):
+    platform_admin = make_user(role="platform_admin")
+    agent = make_agent(
+        platform_admin.id,
+        tenant_id=platform_admin.tenant_id,
+        name="OKR Agent",
+        is_system=True,
+    )
+    db = OKRSettingsDB(None)
+    patch_delete_dependencies(monkeypatch, agent, is_creator=False)
+
+    with pytest.raises(HTTPException) as exc_info:
+        await agents_api.delete_agent(
+            agent_id=agent.id,
+            current_user=platform_admin,
+            db=db,
+        )
+
+    assert exc_info.value.status_code == 403
+    assert exc_info.value.detail == (
+        "This OKR system agent cannot be deleted because its OKR settings are missing. Reconfigure OKR in Company Settings first."
+    )
+    assert db.deleted == []
+
+
+@pytest.mark.asyncio
 async def test_platform_admin_cannot_delete_non_okr_system_agent(monkeypatch):
     platform_admin = make_user(role="platform_admin")
     agent = make_agent(
