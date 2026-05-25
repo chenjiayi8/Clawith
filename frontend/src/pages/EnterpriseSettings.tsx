@@ -525,6 +525,10 @@ export default function EnterpriseSettings() {
         return ENTERPRISE_TABS.includes(hashTab as EnterpriseTab) ? (hashTab as EnterpriseTab) : 'info';
     };
     const [activeTab, setActiveTab] = useState<EnterpriseTab>(getInitialTab);
+    const setActiveEnterpriseTab = (tab: EnterpriseTab) => {
+        setActiveTab(tab);
+        window.history.replaceState(null, '', `#${tab}`);
+    };
 
     // Track selected tenant as state so page refreshes on company switch
     const [selectedTenantId, setSelectedTenantId] = useState(localStorage.getItem('current_tenant_id') || '');
@@ -777,7 +781,7 @@ export default function EnterpriseSettings() {
 
                 <div className="tabs">
                     {ENTERPRISE_TABS.map(tab => (
-                        <div key={tab} className={`tab ${activeTab === tab ? 'active' : ''}`} onClick={() => setActiveTab(tab)}>
+                        <div key={tab} className={`tab ${activeTab === tab ? 'active' : ''}`} onClick={() => setActiveEnterpriseTab(tab)}>
                             {tab === 'quotas' ? t('enterprise.tabs.quotas', 'Quotas') : tab === 'users' ? t('enterprise.tabs.users', 'Users') : tab === 'invites' ? t('enterprise.tabs.invites', 'Invitations') : t(`enterprise.tabs.${tab}`)}
                         </div>
                     ))}

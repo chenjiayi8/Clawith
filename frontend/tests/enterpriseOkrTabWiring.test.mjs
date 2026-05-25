@@ -29,14 +29,26 @@ test('EnterpriseSettings wires the OKR tab and honors #okr deep links', async ()
 
   assert.match(
     source,
-    /activeTab\s*===\s*'okr'\s*&&\s*<OkrTab\s+tenantId=\{selectedTenantId\}\s+t=\{t\}\s*\/>/,
-    'EnterpriseSettings should render OkrTab when the okr tab is active',
+    /activeTab\s*===\s*'okr'/,
+    'EnterpriseSettings should guard OkrTab rendering on the okr tab being active',
+  );
+
+  assert.match(
+    source,
+    /<OkrTab\b[\s\S]*tenantId=\{selectedTenantId\}[\s\S]*t=\{t\}[\s\S]*\/>/,
+    'EnterpriseSettings should render OkrTab with the expected props',
   );
 
   assert.match(
     source,
     /location\.hash|window\.location\.hash/,
     'EnterpriseSettings should read the URL hash so /enterprise#okr opens the OKR tab',
+  );
+
+  assert.match(
+    source,
+    /window\.history\.replaceState\(null,\s*['"]{2},\s*`#\$\{tab\}`\)/,
+    'EnterpriseSettings tab changes should keep the URL hash synced with the active tab',
   );
 });
 
