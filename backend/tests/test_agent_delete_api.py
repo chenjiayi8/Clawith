@@ -346,6 +346,36 @@ async def test_platform_admin_cannot_delete_stray_same_named_system_agent_when_s
 
 
 @pytest.mark.asyncio
+async def test_platform_admin_cannot_delete_okr_system_agent_when_agent_link_missing(monkeypatch):
+    platform_admin = make_user(role="platform_admin")
+    agent = make_agent(
+        platform_admin.id,
+        tenant_id=platform_admin.tenant_id,
+        name="OKR Agent",
+        is_system=True,
+    )
+    settings = OKRSettings(
+        tenant_id=platform_admin.tenant_id,
+        enabled=False,
+        okr_agent_id=None,
+    )
+    db = OKRSettingsDB(settings)
+    patch_delete_dependencies(monkeypatch, agent, is_creator=False)
+
+    with pytest.raises(HTTPException) as exc_info:
+        await agents_api.delete_agent(
+            agent_id=agent.id,
+            current_user=platform_admin,
+            db=db,
+        )
+
+    assert exc_info.value.status_code == 403
+    assert exc_info.value.detail == (
+        "This OKR system agent cannot be deleted because its OKR agent link is missing. Reconfigure OKR in Company Settings first."
+    )
+    assert db.deleted == []
+
+@pytest.mark.asyncio
 async def test_platform_admin_cannot_delete_okr_system_agent_when_settings_missing(monkeypatch):
     platform_admin = make_user(role="platform_admin")
     agent = make_agent(
