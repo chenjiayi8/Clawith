@@ -869,13 +869,16 @@ async def delete_agent(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Delete a digital employee (creator only)."""
+    """Delete a digital employee when allowed by creator/admin rules."""
     agent, _access = await check_agent_access(db, current_user, agent_id)
-    if not is_agent_creator(current_user, agent) and current_user.role not in ("super_admin", "org_admin", "platform_admin"):
+    if not is_agent_creator(current_user, agent) and current_user.role not in ("org_admin", "platform_admin"):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only creator or admin can delete agent")
 
     system_agent_delete_detail = (
         "System agents cannot be deleted. Disable the related feature (e.g. OKR) in Company Settings instead."
+    )
+    missing_okr_link_detail = (
+        "This OKR system agent cannot be deleted because its OKR agent link is missing. Reconfigure OKR in Company Settings first."
     )
     okr_settings: OKRSettings | None = None
 
@@ -893,20 +896,22 @@ async def delete_agent(
             settings_result = await db.execute(select(OKRSettings).where(OKRSettings.tenant_id == agent.tenant_id))
             okr_settings = settings_result.scalar_one_or_none()
 
-        if okr_settings and okr_settings.okr_agent_id is not None:
-            is_okr_system_agent = okr_settings.okr_agent_id == agent.id
-        else:
-            is_okr_system_agent = agent.name == "OKR Agent"
-        if not is_okr_system_agent:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail=system_agent_delete_detail,
-            )
-
         if okr_settings is None:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="This OKR system agent cannot be deleted because its OKR settings are missing. Reconfigure OKR in Company Settings first.",
+            )
+
+        if okr_settings.okr_agent_id is None:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=missing_okr_link_detail,
+            )
+
+        if okr_settings.okr_agent_id != agent.id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=system_agent_delete_detail,
             )
 
         if okr_settings.enabled:
@@ -915,8 +920,7 @@ async def delete_agent(
                 detail="This OKR system agent cannot be deleted while OKR is enabled. Disable OKR in Company Settings first.",
             )
 
-        if okr_settings.okr_agent_id == agent.id:
-            okr_settings.okr_agent_id = None
+        okr_settings.okr_agent_id = None
 
     # Stop container and archive files (best effort)
     from app.services.agent_manager import agent_manager
