@@ -44,7 +44,7 @@ def _should_ignore_member_path(member_path: str) -> bool:
     if path.name in ignored_names:
         return True
 
-    return path.suffix in {".pyc", ".pyo", ".pyd"}
+    return path.suffix in {".pyc", ".pyo"}
 
 
 def inspect_skill_archive(data: bytes, *, target_folder: str) -> dict:
@@ -56,22 +56,23 @@ def inspect_skill_archive(data: bytes, *, target_folder: str) -> dict:
     except zipfile.BadZipFile as exc:
         raise HTTPException(status_code=400, detail="Invalid skill archive") from exc
 
-    total_uncompressed = sum(item.file_size for item in zf.infolist())
-    if total_uncompressed > MAX_SKILL_UNCOMPRESSED:
-        raise HTTPException(status_code=400, detail="Skill archive uncompressed size too large")
-
     files: dict[str, str] = {}
     with zf:
-        members = [item for item in zf.infolist() if not item.is_dir()]
-        if len(members) > MAX_SKILL_ARCHIVE_FILES:
-            raise HTTPException(status_code=400, detail="Too many files in skill archive")
-
         normalized_members: list[tuple[zipfile.ZipInfo, str]] = []
-        for item in members:
+        for item in zf.infolist():
+            if item.is_dir():
+                continue
             raw_path = _normalize_member_path(item.filename)
             if _should_ignore_member_path(raw_path):
                 continue
             normalized_members.append((item, raw_path))
+
+        if len(normalized_members) > MAX_SKILL_ARCHIVE_FILES:
+            raise HTTPException(status_code=400, detail="Too many files in skill archive")
+
+        total_uncompressed = sum(item.file_size for item, _raw_path in normalized_members)
+        if total_uncompressed > MAX_SKILL_UNCOMPRESSED:
+            raise HTTPException(status_code=400, detail="Skill archive uncompressed size too large")
 
         raw_paths = [raw_path for _item, raw_path in normalized_members]
         strip_root = _shared_root_folder(raw_paths)
