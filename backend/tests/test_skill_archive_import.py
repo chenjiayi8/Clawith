@@ -94,3 +94,21 @@ def test_inspect_skill_archive_rejects_non_utf8_files():
 
     assert exc.value.status_code == 400
     assert "UTF-8" in str(exc.value.detail)
+
+
+def test_inspect_skill_archive_ignores_cache_and_system_files():
+    data = _zip_bytes({
+        "demo-skill/SKILL.md": b"# Demo\n",
+        "demo-skill/scripts/run.py": b"print('ok')\n",
+        "demo-skill/scripts/__pycache__/run.cpython-312.pyc": b"\xff\xfe\xfd",
+        "demo-skill/__MACOSX/._SKILL.md": b"junk",
+        "demo-skill/.DS_Store": b"binary-junk",
+    })
+
+    archive = inspect_skill_archive(data, target_folder="demo-skill")
+
+    assert archive["total_files"] == 2
+    assert archive["files"] == {
+        "SKILL.md": "# Demo\n",
+        "scripts/run.py": "print('ok')\n",
+    }
