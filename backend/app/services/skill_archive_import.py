@@ -34,6 +34,19 @@ def _shared_root_folder(paths: list[str]) -> str:
     return roots.pop() if len(roots) == 1 else ""
 
 
+def _should_ignore_member_path(member_path: str) -> bool:
+    path = Path(member_path)
+    ignored_segments = {"__pycache__", "__MACOSX", ".pytest_cache", ".mypy_cache", ".ruff_cache"}
+    if any(segment in ignored_segments for segment in path.parts):
+        return True
+
+    ignored_names = {".DS_Store", "Thumbs.db"}
+    if path.name in ignored_names:
+        return True
+
+    return path.suffix in {".pyc", ".pyo", ".pyd"}
+
+
 def inspect_skill_archive(data: bytes, *, target_folder: str) -> dict:
     if len(data) > MAX_SKILL_ARCHIVE_SIZE:
         raise HTTPException(status_code=400, detail="Skill archive too large")
@@ -53,10 +66,17 @@ def inspect_skill_archive(data: bytes, *, target_folder: str) -> dict:
         if len(members) > MAX_SKILL_ARCHIVE_FILES:
             raise HTTPException(status_code=400, detail="Too many files in skill archive")
 
-        raw_paths = [_normalize_member_path(item.filename) for item in members]
+        normalized_members: list[tuple[zipfile.ZipInfo, str]] = []
+        for item in members:
+            raw_path = _normalize_member_path(item.filename)
+            if _should_ignore_member_path(raw_path):
+                continue
+            normalized_members.append((item, raw_path))
+
+        raw_paths = [raw_path for _item, raw_path in normalized_members]
         strip_root = _shared_root_folder(raw_paths)
 
-        for item, raw_path in zip(members, raw_paths, strict=False):
+        for item, raw_path in normalized_members:
             rel_path = raw_path
             if strip_root:
                 rel_path = rel_path[len(strip_root) + 1 :]

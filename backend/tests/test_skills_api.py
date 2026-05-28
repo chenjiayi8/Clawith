@@ -261,6 +261,27 @@ async def test_preview_folder_upload_reports_existing_registry_diff(monkeypatch,
 
 
 @pytest.mark.asyncio
+async def test_preview_folder_upload_ignores_cache_files(monkeypatch, platform_admin_user):
+    session = FakeSession(skill=None)
+    monkeypatch.setattr(skills_api, "async_session", FakeAsyncSessionFactory(session))
+
+    archive = _zip_bytes({
+        "demo-skill/SKILL.md": b"# Demo\n",
+        "demo-skill/scripts/run.py": b"print('ok')\n",
+        "demo-skill/scripts/__pycache__/run.cpython-312.pyc": b"\xff\xfe\xfd",
+    })
+    result = await skills_api.preview_folder_upload_from_archive(
+        archive,
+        target_folder="demo-skill",
+        current_user=platform_admin_user,
+    )
+
+    assert result["mode"] == "create"
+    assert result["total_files"] == 2
+    assert result["added_paths"] == ["SKILL.md", "scripts/run.py"]
+
+
+@pytest.mark.asyncio
 async def test_apply_folder_upload_replaces_registry_files(monkeypatch, platform_admin_user):
     existing_skill = SimpleNamespace(
         id=uuid.uuid4(),
