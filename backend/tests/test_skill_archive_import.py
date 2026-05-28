@@ -4,6 +4,7 @@ import zipfile
 import pytest
 from fastapi import HTTPException
 
+from app.services import skill_archive_import as skill_archive_import_service
 from app.services.skill_archive_import import inspect_skill_archive, diff_skill_manifests
 
 
@@ -112,3 +113,50 @@ def test_inspect_skill_archive_ignores_cache_and_system_files():
         "SKILL.md": "# Demo\n",
         "scripts/run.py": "print('ok')\n",
     }
+
+
+def test_inspect_skill_archive_ignores_cache_files_for_member_limit():
+    entries = {
+        "demo-skill/SKILL.md": b"# Demo\n",
+        "demo-skill/scripts/run.py": b"print('ok')\n",
+    }
+    entries.update({
+        f"demo-skill/scripts/__pycache__/cached_{index}.cpython-312.pyc": b"\xff\xfe\xfd"
+        for index in range(1005)
+    })
+
+    archive = inspect_skill_archive(_zip_bytes(entries), target_folder="demo-skill")
+
+    assert archive["total_files"] == 2
+    assert sorted(archive["files"]) == ["SKILL.md", "scripts/run.py"]
+
+
+def test_inspect_skill_archive_ignores_cache_files_for_uncompressed_limit(monkeypatch):
+    monkeypatch.setattr(skill_archive_import_service, "MAX_SKILL_UNCOMPRESSED", 16)
+    data = _zip_bytes({
+        "demo-skill/SKILL.md": b"# Demo\n",
+        "demo-skill/scripts/run.py": b"ok\n",
+        "demo-skill/scripts/__pycache__/cached.cpython-312.pyc": b"x" * 32,
+    })
+
+    archive = inspect_skill_archive(data, target_folder="demo-skill")
+
+    assert archive["total_files"] == 2
+    assert archive["files"] == {
+        "SKILL.md": "# Demo\n",
+        "scripts/run.py": "ok\n",
+    }
+
+
+def test_inspect_skill_archive_rejects_non_utf8_pyd_files():
+    data = _zip_bytes({
+        "demo-skill/SKILL.md": b"# Demo\n",
+        "demo-skill/native_extension.pyd": b"\xff\xfe\xfd",
+    })
+
+    with pytest.raises(HTTPException) as exc:
+        inspect_skill_archive(data, target_folder="demo-skill")
+
+    assert exc.value.status_code == 400
+    assert "native_extension.pyd" in str(exc.value.detail)
+    assert "UTF-8" in str(exc.value.detail)
