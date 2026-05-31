@@ -87,6 +87,8 @@ class DockerBackend(BaseSandboxBackend):
         **kwargs
     ) -> ExecutionResult:
         """Execute code inside a docker container."""
+        import asyncio
+
         start_time = time.time()
 
         # Validate language
@@ -100,69 +102,47 @@ class DockerBackend(BaseSandboxBackend):
                 error=f"Unsupported language: {language}. Use: {', '.join(_DOCKER_IMAGES.keys())}"
             )
 
-        # Get image and command
         image = _DOCKER_IMAGES[language]
+        cmd = [*_DOCKER_COMMANDS[language], code]
 
-        # Prepare environment
         env = {
             "HOME": "/root",
             "PYTHONDONTWRITEBYTECODE": "1",
         }
 
-        # Build docker run command
-        if language == "python":
-            cmd = ["python3", "-c", code]
-        elif language == "bash":
-            cmd = ["bash", "-c", code]
-        elif language == "node":
-            cmd = ["node", "-e", code]
-        else:
-            return ExecutionResult(
-                success=False,
-                stdout="",
-                stderr="",
-                exit_code=1,
-                duration_ms=int((time.time() - start_time) * 1000),
-                error=f"Unsupported language: {language}"
-            )
-
-        # Resource limits
         cpu_limit = self.config.cpu_limit
         memory_limit = self.config.memory_limit
-
-        # Network config
-        network = None if not self.config.allow_network else "bridge"
+        network_mode = "bridge" if self.config.allow_network else "none"
+        container = None
 
         try:
             # Pull image if needed
             try:
                 self.client.images.get(image)
             except Exception:
-                # Image not found, pull it
                 self.client.images.pull(image)
 
-            # Run container
+            # Run container detached so we can wait, collect logs, and clean it up.
             container = self.client.containers.run(
                 image,
                 cmd,
-                detach=False,
+                detach=True,
                 mem_limit=memory_limit,
                 cpu_period=100000,  # Docker default
                 cpu_quota=int(float(cpu_limit) * 100000),
-                network_mode=network,
+                network_mode=network_mode,
                 environment=env,
-                remove=True,
+                remove=False,
                 stdout=True,
                 stderr=True,
             )
 
-            # Wait for container with timeout
-            result = container.wait(timeout=timeout)
+            result = await asyncio.to_thread(container.wait, timeout=timeout)
+            stdout_bytes = await asyncio.to_thread(container.logs, stdout=True, stderr=False)
+            stderr_bytes = await asyncio.to_thread(container.logs, stdout=False, stderr=True)
 
-            # Get output
-            stdout = container.logs(stdout=True, stderr=False).decode("utf-8", errors="replace")[:10000]
-            stderr = container.logs(stdout=False, stderr=True).decode("utf-8", errors="replace")[:5000]
-
+            stdout = stdout_bytes.decode("utf-8", errors="replace")[:10000]
+            stderr = stderr_bytes.decode("utf-8", errors="replace")[:5000]
             duration_ms = int((time.time() - start_time) * 1000)
             exit_code = result.get("StatusCode", 1)
 
@@ -180,7 +160,12 @@ class DockerBackend(BaseSandboxBackend):
             error_msg = str(e)
             logger.exception("[Docker] Execution error")
 
-            # Handle timeout specifically
+            if container is not None and "timeout" in error_msg.lower():
+                try:
+                    await asyncio.to_thread(container.kill)
+                except Exception:
+                    logger.debug("[Docker] Failed to kill timed out container", exc_info=True)
+
             if "timeout" in error_msg.lower():
                 return ExecutionResult(
                     success=False,
@@ -199,3 +184,9 @@ class DockerBackend(BaseSandboxBackend):
                 duration_ms=duration_ms,
                 error=f"Docker execution error: {error_msg[:200]}"
             )
+        finally:
+            if container is not None:
+                try:
+                    await asyncio.to_thread(container.remove, force=True)
+                except Exception:
+                    logger.debug("[Docker] Failed to remove container", exc_info=True)
