@@ -49,6 +49,7 @@ services:
       FEISHU_APP_SECRET: ${FEISHU_APP_SECRET:-}
       DOCKER_NETWORK: clawith_network
       SS_CONFIG_FILE: /data/ss-nodes.json
+      SANDBOX_TYPE: docker
       # Public base URL for constructing OAuth callback URLs and email links.
       # Required when deployed behind a reverse proxy (e.g. Nginx, Cloudflare).
       # If not set, the server infers the URL from the incoming request host.
