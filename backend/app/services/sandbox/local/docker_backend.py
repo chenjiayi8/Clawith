@@ -159,14 +159,15 @@ class DockerBackend(BaseSandboxBackend):
             duration_ms = int((time.time() - start_time) * 1000)
             error_msg = str(e)
             logger.exception("[Docker] Execution error")
+            is_timeout_error = any(token in error_msg.lower() for token in ("timeout", "timed out"))
 
-            if container is not None and "timeout" in error_msg.lower():
+            if container is not None and is_timeout_error:
                 try:
                     await asyncio.to_thread(container.kill)
                 except Exception:
                     logger.debug("[Docker] Failed to kill timed out container", exc_info=True)
 
-            if "timeout" in error_msg.lower():
+            if is_timeout_error:
                 return ExecutionResult(
                     success=False,
                     stdout="",
