@@ -7,7 +7,7 @@ from pathlib import Path
 import shutil
 import tomllib
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Response
 from fastapi.middleware.cors import CORSMiddleware
 from loguru import logger
 
@@ -408,29 +408,7 @@ def _check_dependencies() -> dict:
     Uses the same logic as entrypoint.sh Step 1.5 to catch stale container
     images before they serve traffic. Results are cached after first call.
     """
-    MAPPING = {
-        "PyMuPDF": "fitz",
-        "Pillow": "PIL",
-        "beautifulsoup4": "bs4",
-        "python-docx": "docx",
-        "python-pptx": "pptx",
-        "python-jose": "jose",
-        "python-multipart": "multipart",
-        "discord.py": "discord",
-        "dingtalk-stream": "dingtalk_stream",
-        "pycryptodome": "Crypto",
-        "lxml-html-clean": "lxml_html_clean",
-        "wuying-agentbay-sdk": "agentbay",
-        "pydantic-settings": "pydantic_settings",
-        "lark-oapi": "lark_oapi",
-        "PyNaCl": "nacl",
-        "passlib": "passlib",
-        "wecom-aibot-sdk-python": "wecom_aibot_sdk",
-        "websockets": "websockets",
-        "aiofiles": "aiofiles",
-        "httpx": "httpx",
-        "pyyaml": "yaml",
-    }
+    from app.dep_mapping import MAPPING
 
     pyproject = Path(__file__).resolve().parent.parent / "pyproject.toml"
     if not pyproject.exists():
@@ -457,12 +435,14 @@ def _check_dependencies() -> dict:
 
 
 @app.get("/api/health", response_model=HealthResponse, tags=["health"])
-async def health_check():
+async def health_check(response: Response):
     """Health check endpoint with dependency verification."""
     global _DEP_CHECK_RESULT
     if _DEP_CHECK_RESULT is None:
         _DEP_CHECK_RESULT = _check_dependencies()
     deps_ok = _DEP_CHECK_RESULT.get("ok", False)
+    if not deps_ok:
+        response.status_code = 503
     return HealthResponse(
         status="ok" if deps_ok else "degraded",
         version=settings.APP_VERSION,
