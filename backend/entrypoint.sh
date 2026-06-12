@@ -62,30 +62,9 @@ echo "[entrypoint] Step 1.5: Verifying Python dependencies..."
 python3 << 'PYEOF'
 import sys, tomllib
 
-# Import-name mapping for packages whose Python import differs from PyPI name
-MAPPING = {
-    "PyMuPDF": "fitz",
-    "Pillow": "PIL",
-    "beautifulsoup4": "bs4",
-    "python-docx": "docx",
-    "python-pptx": "pptx",
-    "python-jose": "jose",
-    "python-multipart": "multipart",
-    "discord.py": "discord",
-    "dingtalk-stream": "dingtalk_stream",
-    "pycryptodome": "Crypto",
-    "lxml-html-clean": "lxml_html_clean",
-    "wuying-agentbay-sdk": "agentbay",
-    "pydantic-settings": "pydantic_settings",
-    "lark-oapi": "lark_oapi",
-    "PyNaCl": "nacl",
-    "passlib": "passlib",
-    "wecom-aibot-sdk-python": "wecom_aibot_sdk",
-    "websockets": "websockets",
-    "aiofiles": "aiofiles",
-    "httpx": "httpx",
-    "pyyaml": "yaml",
-}
+# Import the shared mapping module (same source as main.py _check_dependencies)
+sys.path.insert(0, "/app")
+from app.dep_mapping import MAPPING
 
 try:
     with open("/app/pyproject.toml", "rb") as f:
