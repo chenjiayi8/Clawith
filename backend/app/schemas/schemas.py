@@ -546,6 +546,8 @@ class PaginatedResponse(BaseModel):
 class HealthResponse(BaseModel):
     status: str = "ok"
     version: str
+    deps_ok: bool = True
+    dependencies: dict | None = None
 
 
 # ─── Gateway (OpenClaw) ─────────────────────────────────

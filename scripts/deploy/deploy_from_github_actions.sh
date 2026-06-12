@@ -110,6 +110,13 @@ for attempt in $(seq 1 "$max_attempts"); do
       if ! docker compose exec -T backend curl -fsS http://localhost:8000/api/health; then
         fail_with_diagnostics "Deployment failed: backend health endpoint check failed for commit $commit_sha"
       fi
+      # Verify critical file-processing dependencies are importable
+      if ! docker compose exec -T backend python3 -c "
+import fitz, pdfplumber, docx, openpyxl, pptx
+from PIL import Image
+" 2>/dev/null; then
+        fail_with_diagnostics "Deployment failed: critical Python dependencies missing (fitz/pdfplumber/docx/openpyxl/pptx/PIL)" backend
+      fi
       if ! curl -fsS "http://127.0.0.1:${FRONTEND_PORT}/" >/dev/null; then
         fail_with_diagnostics "Deployment failed: frontend was not reachable on host port ${FRONTEND_PORT}" all
       fi

@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import tomllib
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -397,10 +398,77 @@ app.include_router(okr_router)  # OKR — self-prefixed at /api/okr
 app.include_router(onboarding_router, prefix=settings.API_PREFIX)
 
 
+# Cache so we only verify deps once at startup
+_DEP_CHECK_RESULT: dict | None = None
+
+
+def _check_dependencies() -> dict:
+    """Verify that all declared Python dependencies are importable.
+
+    Uses the same logic as entrypoint.sh Step 1.5 to catch stale container
+    images before they serve traffic. Results are cached after first call.
+    """
+    MAPPING = {
+        "PyMuPDF": "fitz",
+        "Pillow": "PIL",
+        "beautifulsoup4": "bs4",
+        "python-docx": "docx",
+        "python-pptx": "pptx",
+        "python-jose": "jose",
+        "python-multipart": "multipart",
+        "discord.py": "discord",
+        "dingtalk-stream": "dingtalk_stream",
+        "pycryptodome": "Crypto",
+        "lxml-html-clean": "lxml_html_clean",
+        "wuying-agentbay-sdk": "agentbay",
+        "pydantic-settings": "pydantic_settings",
+        "lark-oapi": "lark_oapi",
+        "PyNaCl": "nacl",
+        "passlib": "passlib",
+        "wecom-aibot-sdk-python": "wecom_aibot_sdk",
+        "websockets": "websockets",
+        "aiofiles": "aiofiles",
+        "httpx": "httpx",
+        "pyyaml": "yaml",
+    }
+
+    pyproject = Path(__file__).resolve().parent.parent / "pyproject.toml"
+    if not pyproject.exists():
+        return {"ok": False, "error": "pyproject.toml not found"}
+
+    with open(pyproject, "rb") as f:
+        data = tomllib.load(f)
+
+    deps = data.get("project", {}).get("dependencies", [])
+    checked: list = []
+    failed: list = []
+
+    for dep_line in deps:
+        name = dep_line.split("[")[0].split(">")[0].split("=")[0].split("!=")[0].split("<")[0].split("~")[0].strip()
+        import_name = MAPPING.get(name, name.replace("-", "_"))
+        try:
+            __import__(import_name)
+            checked.append({"name": name, "status": "ok"})
+        except ImportError:
+            checked.append({"name": name, "status": "missing", "import_name": import_name})
+            failed.append({"name": name, "import_name": import_name})
+
+    return {"ok": len(failed) == 0, "checked": checked, "failed": failed}
+
+
 @app.get("/api/health", response_model=HealthResponse, tags=["health"])
 async def health_check():
-    """Health check endpoint."""
-    return HealthResponse(status="ok", version=settings.APP_VERSION)
+    """Health check endpoint with dependency verification."""
+    global _DEP_CHECK_RESULT
+    if _DEP_CHECK_RESULT is None:
+        _DEP_CHECK_RESULT = _check_dependencies()
+    deps_ok = _DEP_CHECK_RESULT.get("ok", False)
+    return HealthResponse(
+        status="ok" if deps_ok else "degraded",
+        version=settings.APP_VERSION,
+        deps_ok=deps_ok,
+        dependencies=_DEP_CHECK_RESULT,
+    )
 
 
 # ── Version endpoint (public, no auth required) ──
