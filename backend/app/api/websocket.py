@@ -547,7 +547,35 @@ async def websocket_chat(
                     .limit(ctx_size)
                 )
                 history_messages = list(reversed(history_result.scalars().all()))
-                logger.info(f"[WS] Loaded {len(history_messages)} history messages for session {conv_id}")
+                # Strip orphaned tool_call messages: when the WebSocket disconnects
+                # mid-generation, tool_call rows are saved but the final assistant
+                # response is lost, leaving an incoherent tail. Trim them so the
+                # conversation ends cleanly on the next reconnect.
+                orphaned_count = 0
+                while history_messages and history_messages[-1].role == "tool_call":
+                    orphaned_count += 1
+                    history_messages.pop()
+                if orphaned_count:
+                    # Also clean up from the DB so they don't accumulate.
+                    try:
+                        _last_clean = history_messages[-1] if history_messages else None
+                        _cutoff = _last_clean.created_at if _last_clean else None
+                        from sqlalchemy import delete as _sa_delete
+                        _stmt = _sa_delete(ChatMessage).where(
+                            ChatMessage.conversation_id == conv_id,
+                            ChatMessage.role == "tool_call",
+                        )
+                        if _cutoff is not None:
+                            _stmt = _stmt.where(ChatMessage.created_at > _cutoff)
+                        _del_result = await db.execute(_stmt)
+                        await db.commit()
+                        logger.info(
+                            f"[WS] Cleaned up {_del_result.rowcount} orphaned tool_call(s) "
+                            f"from session {conv_id}"
+                        )
+                    except Exception as _clean_err:
+                        logger.warning(f"[WS] Orphan cleanup failed (non-fatal): {_clean_err}")
+                logger.info(f"[WS] Loaded {len(history_messages)} history messages for session {conv_id} (stripped {orphaned_count} orphaned)")
                 needs_session_title_generation = not history_messages
             except Exception as e:
                 logger.warning(f"[WS] History load failed (non-fatal): {e}")
