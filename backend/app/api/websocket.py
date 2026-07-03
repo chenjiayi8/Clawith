@@ -978,6 +978,11 @@ async def websocket_chat(
                     
                     # Accumulate partial content for abort handling
                     partial_chunks: list[str] = []
+                    # Track whether the WebSocket is still alive. When the client
+                    # disconnects mid-generation we let the LLM task finish in the
+                    # background so the response is persisted and waiting when the
+                    # user returns to the session.
+                    _ws_alive = True
 
                     # Set inside _call_with_failover when an onboarding prompt
                     # was injected for this turn. The first streamed chunk then
@@ -1014,9 +1019,15 @@ async def websocket_chat(
 
                     async def stream_to_ws(text: str):
                         """Send each chunk to client in real-time."""
+                        nonlocal _ws_alive
                         partial_chunks.append(text)
-                        await websocket.send_json({"type": "chunk", "content": text})
-                        await maybe_mark_onboarding_progress()
+                        if _ws_alive:
+                            try:
+                                await websocket.send_json({"type": "chunk", "content": text})
+                            except WebSocketDisconnect:
+                                _ws_alive = False
+                        if _ws_alive:
+                            await maybe_mark_onboarding_progress()
                     
                     async def tool_call_to_ws(data: dict):
                         """Send tool call info to client and persist completed ones."""
@@ -1080,7 +1091,12 @@ async def websocket_chat(
                                 }
                                 logger.info(f"[WS][Workspace] activity: {_done_tool_name} → {_ws_path}")
 
-                        await websocket.send_json({"type": "tool_call", **data})
+                        nonlocal _ws_alive
+                        if _ws_alive:
+                            try:
+                                await websocket.send_json({"type": "tool_call", **data})
+                            except WebSocketDisconnect:
+                                _ws_alive = False
                         # Save completed tool calls to DB so they persist in chat history
                         if data.get("status") == "done":
                             try:
@@ -1115,13 +1131,19 @@ async def websocket_chat(
                     
                     async def thinking_to_ws(text: str):
                         """Send thinking chunks to client for collapsible display."""
+                        nonlocal _ws_alive
                         thinking_content.append(text)
-                        await websocket.send_json({"type": "thinking", "content": text})
+                        if _ws_alive:
+                            try:
+                                await websocket.send_json({"type": "thinking", "content": text})
+                            except WebSocketDisconnect:
+                                _ws_alive = False
 
                     _workspace_draft_cache: dict[str, str] = {}
 
                     async def tool_delta_to_ws(data: dict):
                         """Stream workspace file-operation drafts while tool args are still arriving."""
+                        nonlocal _ws_alive
                         tool_name = data.get("name", "")
                         if tool_name not in {
                             "write_file",
@@ -1149,15 +1171,19 @@ async def websocket_chat(
                             return
                         _workspace_draft_cache[draft_id] = raw_args
 
-                        await websocket.send_json(
-                            {
-                                "type": "workspace_draft",
-                                "id": draft_id,
-                                "index": data.get("index", 0),
-                                "name": tool_name,
-                                "arguments": raw_args,
-                            }
-                        )
+                        if _ws_alive:
+                            try:
+                                await websocket.send_json(
+                                    {
+                                        "type": "workspace_draft",
+                                        "id": draft_id,
+                                        "index": data.get("index", 0),
+                                        "name": tool_name,
+                                        "arguments": raw_args,
+                                    }
+                                )
+                            except WebSocketDisconnect:
+                                _ws_alive = False
 
                     import asyncio as _aio
 
@@ -1166,7 +1192,12 @@ async def websocket_chat(
                         nonlocal needs_onboarding_mark, onboarding_target_phase
 
                         async def _on_failover(reason: str):
-                            await websocket.send_json({"type": "info", "content": f"Primary model error, {reason}"})
+                            nonlocal _ws_alive
+                            if _ws_alive:
+                                try:
+                                    await websocket.send_json({"type": "info", "content": f"Primary model error, {reason}"})
+                                except WebSocketDisconnect:
+                                    _ws_alive = False
 
                         # To prevent tool call message pairs(assistant + tool) from being broken down.
                         _truncated = conversation[-ctx_size:]
@@ -1223,6 +1254,7 @@ async def websocket_chat(
 
                     # Listen for abort while LLM is running
                     aborted = False
+                    disconnected = False
                     queued_messages: list[dict] = []
                     while not llm_task.done():
                         try:
@@ -1240,8 +1272,13 @@ async def websocket_chat(
                         except _aio.TimeoutError:
                             continue
                         except WebSocketDisconnect:
-                            llm_task.cancel()
-                            raise
+                            # Don't cancel the LLM — let it finish in the
+                            # background so the response is persisted and
+                            # waiting when the user returns to the session.
+                            disconnected = True
+                            _ws_alive = False
+                            logger.info("[WS] Client disconnected; LLM task continues in background")
+                            break
 
                     if aborted:
                         # Wait for task to finish cancelling
@@ -1256,8 +1293,20 @@ async def websocket_chat(
                             assistant_response = "*[Generation stopped]*"
                         logger.info(f"[WS] LLM aborted, partial: {assistant_response[:80]}")
                     else:
-                        assistant_response = await llm_task
-                        logger.info(f"[WS] LLM response: {assistant_response[:80]}")
+                        if disconnected:
+                            # LLM ran in background after disconnect. The streaming
+                            # callbacks gracefully degrade (they catch WebSocketDisconnect
+                            # and set _ws_alive=False), so the task should complete
+                            # normally. Guard against unexpected errors just in case.
+                            try:
+                                assistant_response = await llm_task
+                            except Exception as _bg_err:
+                                logger.warning(f"[WS] Background LLM task failed: {_bg_err}")
+                                assistant_response = "".join(partial_chunks).strip() or None
+                        else:
+                            assistant_response = await llm_task
+                        if assistant_response:
+                            logger.info(f"[WS] LLM response: {assistant_response[:80]}")
 
                     # call_llm returns error strings instead of raising — detect and
                     # re-raise so the fallback model logic below can trigger correctly.
@@ -1270,7 +1319,7 @@ async def websocket_chat(
                     # Update onboarding progress for finish-only turns that never emitted
                     # a streamed chunk or tool-status callback (for example an
                     # onboarding greeting that immediately returns via `finish`).
-                    if not aborted:
+                    if not aborted and not disconnected:
                         onboarding_mark_done = await _finalize_onboarding_progress_if_needed(
                             needs_onboarding_mark=needs_onboarding_mark,
                             onboarding_mark_done=onboarding_mark_done,
@@ -1301,7 +1350,9 @@ async def websocket_chat(
                     from app.services.activity_logger import log_activity
                     await log_activity(agent_id, "chat_reply", f"Replied to web chat: {assistant_response[:80]}", detail={"channel": "web", "user_text": content[:200], "reply": assistant_response[:500]})
                 except WebSocketDisconnect:
-                    raise
+                    if not disconnected:
+                        raise
+                    logger.info("[WS] WebSocketDisconnect after background LLM completed; ignoring")
                 except Exception as e:
                     logger.error(f"[WS] LLM error: {e}")
                     import traceback
@@ -1393,15 +1444,20 @@ async def websocket_chat(
                 except Exception as title_err:
                     logger.warning(f"[WS] Session title scheduling failed: {title_err}")
 
-            # Final 'done' packet
-            await websocket.send_json(
-                {
-                    "type": "done",
-                    "role": "assistant",
-                    "content": assistant_response,
-                    "message_id": assistant_msg_id,
-                }
-            )
+            # Final 'done' packet — only if the WebSocket is still alive.
+            # If the client disconnected mid-generation, the response is already
+            # persisted to DB and will be visible on the next reconnect.
+            if not disconnected:
+                await websocket.send_json(
+                    {
+                        "type": "done",
+                        "role": "assistant",
+                        "content": assistant_response,
+                        "message_id": assistant_msg_id,
+                    }
+                )
+            else:
+                logger.info("[WS] Background LLM completed and saved; skipping done event (disconnected)")
 
             # Re-process any queued messages (if user sent something during generation)
             for qm in queued_messages:
